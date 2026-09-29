@@ -21,3 +21,9 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 - Rule: write the measured SPEC **before round 1**; critics must cite spec lines; a critic demand not backed by a measured reference number is a hypothesis, not a target.
 - Reference clips stored at 60 fps may carry 30 fps content — compare motion at the content rate.
 - A GPU lock (flock-based capture slots + exclusive perf) now ships in `tools/gpu/`; a live test correctly refused to measure perf while three game instances ran.
+
+## 2026-09-29 16:43 — the GPU took the desktop down
+
+- Five builders + a perf piece + a Blender job launched 11 Unreal instances in 13 minutes (one agent was crash-relaunching an editor every ~30 s). The GPU saturated, macOS's WindowServer missed its watchdog check-in for 40 s, and the system killed it — which logs the user out and kills every app, including the orchestrator's terminal and all agents. The machine itself stayed up.
+- The GPU lock only covered captures and perf runs; editors and build commandlets bypassed it. Rule now: a global cap of 2 renderer-bearing engine processes (editors included) through the lock, null-RHI commandlets for builds, no auto-relaunch loops, kill orphaned crash reporters.
+- Recovery: commit + push every worktree's WIP immediately, kill leftover engine/crash-reporter processes you own, then resume at lower concurrency.

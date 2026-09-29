@@ -53,6 +53,7 @@ Break the game into pieces that can be judged independently. Give each piece one
 ## Hard-won rules (each from a real incident)
 
 - **Usage:** six parallel Opus builders exhausted a weekly limit in ~1 hour. Cap concurrency, put pipeline work on Sonnet, track tokens in the ledger.
+- **Hard GPU cap across ALL agents: at most 2 engine processes with a renderer at once (editors count), every launch through the GPU slot lock, builds/imports via null-RHI commandlets.** 11 Unreal instances in 13 minutes starved the GPU until macOS's WindowServer watchdog killed it and logged the owner out, killing every agent. Never auto-relaunch a crashing editor; kill orphaned crash reporters (they spin at 100% CPU for hours).
 - **One engine instance per agent, launched offscreen** (`-RenderOffScreen -NoSound` for Unreal, including the editor), max 3 at once on one GPU, close the editor when idle. A windowed game grabbed the owner's mouse and Escape didn't release it — ship a mouse-safe controller (no capture on launch, Escape always releases) before any windowed run.
 - **Kill only by your own absolute project path.** A shared README said `pkill -f Project.uproject`, which matches every agent's editor.
 - **Delete only inside your own worktree/scratch**, via a path check. An agent's cleanup targeted the owner's browser profile (the OS blocked it).
