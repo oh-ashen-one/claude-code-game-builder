@@ -14,3 +14,10 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 - **Infra incidents:** windowed game trapped the owner's mouse; `pkill` pattern matched everyone's editor; agent cleanup targeted a browser profile; agent pushed an unrequested global rule; session restart killed all agents mid-round; LFS refused on public fork and then budget exhausted; progress-page timestamps guessed wrong. Each became a rule in SKILL.md.
 - **IP:** upstream ad atlases and liveries carried third-party brands; excluded per cell with an OCR check.
 - **Wins:** Unreal Midtown from the browser city in one round (exporter + GLSL→HLSL facade port); window glass fixed by mip bias; 2,225 storefronts + 616 fire escapes procedurally; brute texture fixed by repainting on the correct UV layout; wall-run with procedural limb phase; swing cadence and facade clearance fixed with measurable checks.
+
+## 2026-09-29 (afternoon) — measure the reference before trusting a critic
+
+- A numeric-spec pass that **measured the reference clips** (YOLO person boxes, vanishing-point camera estimates, luminance histograms) showed three earlier critic demands were contradicted by the reference itself: "hero should swing between 30–70 % of frame width" (reference: hero stays centred, 3–5 % spread — the lively feel comes from camera yaw 2–25° and near geometry filling one side), "rope on screen ≥75 %" (reference 25–45 %), "anchor must be in frame" (reference rope runs off the top edge). One of these had already been sent to a builder as its round target.
+- Rule: write the measured SPEC **before round 1**; critics must cite spec lines; a critic demand not backed by a measured reference number is a hypothesis, not a target.
+- Reference clips stored at 60 fps may carry 30 fps content — compare motion at the content rate.
+- A GPU lock (flock-based capture slots + exclusive perf) now ships in `tools/gpu/`; a live test correctly refused to measure perf while three game instances ran.
