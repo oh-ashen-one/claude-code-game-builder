@@ -7,6 +7,8 @@ description: Run a long, multi-agent build → capture → blind-critic → fix 
 
 A field-tested process for improving a game toward a reference-quality target with many agents over many hours. Written from a real 20-hour run (a three.js homage web-swinging game ported to Unreal Engine 5.8 on a Mac Studio M3 Ultra, judged against a shipped AAA game). Every rule here exists because breaking it cost us time.
 
+Based on **the Gauntlet Loop by Matt Shumer** (https://somethingbig.ai/gauntlet-loop/generator): a real bar the agent can inspect, work split into independently judged pieces, and a separate harsh critic for every builder. This skill is that loop applied to game development, plus our lessons.
+
 Read this file fully before starting. Detail lives in `references/`; ready-to-use tools and templates in `tools/` and `templates/`.
 
 ## The loop in one paragraph
