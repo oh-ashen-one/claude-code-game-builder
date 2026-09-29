@@ -1,0 +1,73 @@
+{
+ "title": "My Game Loop",
+ "branch": "loop-night-1",
+ "updated": "2026-01-01 00:00",
+ "phase": "Wave 1",
+ "headline": "What happened most recently, in one or two sentences.",
+ "target": "<reference game> quality at 3840\u00d72160, 60 fps on <hardware>, internal res disclosed.",
+ "pieces": [
+  {
+   "id": "P1",
+   "name": "City",
+   "branch": "loop/city",
+   "state": "building",
+   "round": 1,
+   "verdict": "",
+   "gap": ""
+  }
+ ],
+ "comparisons": [
+  {
+   "title": "Round 2 vs round 1",
+   "note": "",
+   "images": [
+    {
+     "label": "before",
+     "src": "docs/loop/city/round-01/S1.jpg"
+    },
+    {
+     "label": "after",
+     "src": "docs/loop/city/round-02/S1.jpg"
+    }
+   ]
+  }
+ ],
+ "clips": [
+  {
+   "title": "Swing chain",
+   "src": "docs/loop/traversal/round-01/a.mp4",
+   "caption": ""
+  }
+ ],
+ "critic": [
+  {
+   "t": "07:15",
+   "piece": "P3 Traversal",
+   "round": 1,
+   "verdict": "fails",
+   "gap": "Single biggest gap as a testable instruction",
+   "notes": ""
+  }
+ ],
+ "perf": [
+  {
+   "what": "Scripted swing route",
+   "output": "3840\u00d72160",
+   "internal": "1920\u00d71080 (TSR 50%)",
+   "median": "24.1",
+   "p95": "29.0",
+   "p99": "\u2013",
+   "hitches": "0",
+   "notes": "exclusive GPU lock, util 4% before"
+  }
+ ],
+ "gaps": [
+  "Biggest remaining gaps, honestly stated"
+ ],
+ "log": [
+  {
+   "t": "06:00",
+   "text": "Real clock times only (date +%H:%M)."
+  }
+ ]
+}
