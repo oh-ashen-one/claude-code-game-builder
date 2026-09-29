@@ -150,7 +150,7 @@ a {{ color: var(--accent); }} a:focus-visible, video:focus-visible {{ outline: 2
   <h1>{e(data.get("title", "Loop Board"))}</h1>
   <p class="lede">{e(data["headline"])}</p>
   <div class="meta"><span>Updated {e(data["updated"])}</span><span>Branch {e(data.get("branch", ""))}</span><span>{e(data["target"])}</span></div>
-  <p class="disclaimer">Homage fan project. Not an official Marvel, Sony or Insomniac game and not affiliated with them; nothing here is meant to infringe. Reference frames from the real game are used privately for critique only and are not shown on this page.</p>
+  <p class="disclaimer">{e(data.get("disclaimer", ""))}</p>
 </header>
 <section><h2>Pieces</h2>
 <div class="tablewrap"><table><thead><tr><th>ID</th><th>Piece</th><th>State</th><th>Round</th><th>Latest verdict</th><th>Current biggest gap</th></tr></thead><tbody>{rows}</tbody></table></div></section>
