@@ -81,7 +81,7 @@ Break the game into pieces that can be judged independently. Give each piece one
 - `references/perf-protocol.md` — GPU lock, exclusive perf runs, what to record.
 - `references/unreal-notes.md` — UE 5.8 on macOS: MCP, offscreen capture, UBT, glTF import quirks, Nanite UV limits, Lumen, TSR.
 - `references/lessons-log.md` — dated log of what we learned; append after every loop.
-- `tools/` — `abpack.py`, `progress.py`, `gpu_slot.sh` (see references), `ue_mcp.py`.
+- `tools/` — `abpack.py`, `progress.py`, `gpu/` (gpu_slot.sh capture/perf lock + tests), `ue_mcp.py`.
 - `templates/` — RULES.md, OWNERSHIP.md, CRITIC_PROMPT.md, SPEC.md, HANDOFF.md, agent definitions.
 
 ## Keep this skill alive
