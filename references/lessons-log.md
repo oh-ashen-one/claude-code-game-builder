@@ -34,3 +34,8 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 - **Owner messages sent mid-run are relayed into running Workflow agents.** Two builders answered the owner's question ("how's the CPU/GPU?", "what happened?") instead of doing their build, wasting a round each. A soft "ignore relayed messages" line wasn't enough; put it first, in capitals, and say the question is already answered.
 - **A same-gap A/B build (Sonnet xhigh vs Opus high) is the only fair model comparison.** Per-round averages mix gap difficulty.
 - **First same-gap A/B (river water, identical brief, separate worktrees, blind Opus critic):** Opus 5.5 high 3.8 vs Sonnet 5.5 xhigh 3.4. Opus won on colour and reflections; Sonnet won on shoreline foam and the far-view luma rule. Take the winner and graft the loser's best element next round — the A/B is useful beyond the ledger.
+
+## 2026-09-29 23:08 — a SIGKILL'd engine panicked the kernel
+
+- Stopping agents mid-round, the orchestrator `kill -9`ed a 4K Unreal `-game` perf run mid-frame. It never finished exiting: it stayed a zombie inside the GPU driver. The stopped agents' capture shell loops were still alive and launched two more engines on top. GPU pinned at 100 %, WindowServer blocked uninterruptibly in the kernel, and after 120 s the watchdog **panicked and rebooted the machine** (worse than the 16:43 logout).
+- Rules: when stopping an agent, kill its driver scripts before its engine; stop engines with SIGTERM + wait, SIGKILL only as a last resort; the GPU slot lock refuses every launch while any engine process is stuck exiting (`ps` stat `E`/`Z`).
