@@ -39,3 +39,8 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 
 - Stopping agents mid-round, the orchestrator `kill -9`ed a 4K Unreal `-game` perf run mid-frame. It never finished exiting: it stayed a zombie inside the GPU driver. The stopped agents' capture shell loops were still alive and launched two more engines on top. GPU pinned at 100 %, WindowServer blocked uninterruptibly in the kernel, and after 120 s the watchdog **panicked and rebooted the machine** (worse than the 16:43 logout).
 - Rules: when stopping an agent, kill its driver scripts before its engine; stop engines with SIGTERM + wait, SIGKILL only as a last resort; the GPU slot lock refuses every launch while any engine process is stuck exiting (`ps` stat `E`/`Z`).
+
+## 2026-09-30 06:55 — the "safe ceiling of ~5" was wrong
+
+- An auto-tuner raised the engine cap to 5 because WindowServer CPU stayed low. At 06:55 four concurrent 4K Lumen/HW-RT captures held the GPU at 100 % for minutes; WindowServer starved **on the GPU** (its CPU read 0–8 %), missed its watchdog and was reset. The owner was logged out and the desktop session was left dead, so every later engine launch hung until a human logged in — the overnight loop lost its ability to render.
+- Rules: WindowServer CPU is not a strain signal; sustained 100 % GPU with 3+ heavy renderers is. Hard cap 2 heavy renderers on one machine, never auto-raised. Keep a PAUSED switch in the GPU lock so the orchestrator can stop every launch at once, and have builders fall back to CPU-side work.
