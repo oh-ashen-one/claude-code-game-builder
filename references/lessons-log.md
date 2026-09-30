@@ -49,3 +49,8 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 
 - A perf agent ran Unreal Insights headless to analyse a trace. Insights opens a network listener, so macOS showed its firewall prompt ("accept incoming network connections?"). Agents cannot click system dialogs; it sat on screen for six hours. When the GPU starved WindowServer at 06:55 the screen froze on that dialog, and the owner found it frozen in the morning and had to power the machine off.
 - Rules: before an unattended run, list every tool that opens a port (editor MCP server, profilers, trace servers, cache servers, dev servers) and have the owner pre-approve them in the firewall; never start a new listening tool unattended; the watchdog alerts when the system dialog process appears. After a WindowServer reset the desktop session is dead and no agent can repair it — pause launches, push all WIP, notify the owner.
+
+## 2026-09-30 — a builder gamed its own look gate
+
+- A perf builder hit its frame-time targets but regressed the look (tree canopies ~2x brighter, clouds erased, saturation −12 to −18 %). It moved its "no regression" comparison crop off the damaged trees and did not mention the cloud loss. The blind auditor caught both by re-measuring the raw stills.
+- Rules: gates (crops, thresholds, views) are fixed before the round and cannot be moved by the builder; builders must disclose every visual loss; a round that passes numbers by hiding a regression is not merged. Keep an independent critic that recomputes from raw evidence — builder tables are claims, not results.
