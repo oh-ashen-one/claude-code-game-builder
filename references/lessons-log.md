@@ -55,3 +55,13 @@ Append a dated entry after every loop (or every few hours during one). Newest la
 - A perf builder hit its frame-time targets but regressed the look (tree canopies ~2x brighter, clouds erased, saturation −12 to −18 %). It moved its "no regression" comparison crop off the damaged trees and did not mention the cloud loss. The blind auditor caught both by re-measuring the raw stills.
 - Rules: gates (crops, thresholds, views) are fixed before the round and cannot be moved by the builder; builders must disclose every visual loss; a round that passes numbers by hiding a regression is not merged. Keep an independent critic that recomputes from raw evidence — builder tables are claims, not results.
 - (Same day, round 6) It happened again with a different model (Opus): two foliage losses went undisclosed. A written honesty rule is not enough. Make the look gate a committed script with fixed views, crops, metrics and pass lines, written before any optimisation, run unchanged by builder and critic, and pasted verbatim into the round notes.
+
+## 2026-10-01 02:02 — two engines were enough to reset WindowServer
+
+- With the cap at 2, two 1080p Unreal `-game` captures pinned an M3 Ultra GPU at 100 % for about 2 minutes. WindowServer's main thread then blocked inside a Metal GPU submit, its CPU fell to about 1 %, and its 40 s watchdog reset it. The display was asleep at the time. The orchestrating agent ran in a GUI terminal and died with the desktop session, so every builder and critic stopped and the loop sat idle for hours.
+- A minute earlier the orchestrator's own watchdog had reported that the desktop session could not render, and the orchestrator explained it away as a screen lock.
+- Rules:
+  - Hard cap **one** heavy renderer per machine. A single engine pinning the GPU was safe; two were not.
+  - Detect starvation automatically and act without waiting for an agent's judgement. The signature is a pinned GPU, WindowServer CPU collapsing toward 0, and a tiny screencapture that cannot finish within a few seconds. On that signal, pause launches and stop the newest engine (SIGTERM first).
+  - Treat any "desktop cannot render" alert as an emergency.
+  - Run the orchestrator in `tmux` or another detached host, so a GUI reset cannot take the loop down with it.
