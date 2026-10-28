@@ -92,6 +92,22 @@ def frontmost_pid():
     return int(m.group(1)) if m else None
 
 
+def gui_pids():
+    """PIDs of regular (Dock-visible, type=Foreground) apps: things the owner interacts with. Never throttled."""
+    r = run(["lsappinfo", "list"])
+    out, pid = set(), None
+    for line in (r.stdout if r else "").splitlines():
+        m = re.search(r"\bpid\s*=\s*(\d+)", line)
+        if m:
+            pid = int(m.group(1))
+            if 'type="Foreground"' in line:
+                out.add(pid)
+    return out
+
+
+CAPTURE_FLAGS = re.compile(r"-WHShotDir=|(^|\s)-game(\s|$)|-RenderOffScreen")
+
+
 def descendants(table, root):
     kids = {}
     for pid, p in table.items():
@@ -144,11 +160,16 @@ def candidates(table, flag=None):
     protected = set()
     for spid in recent:
         protected |= {int(spid)} | descendants(table, int(spid))
+    for gpid in gui_pids():
+        if gpid in table:
+            protected |= {gpid} | descendants(table, gpid)
     out = []
     for pid, p in table.items():
         if pid in protected or PROTECT.search(p["args"]):
             continue
-        if p["cpu"] >= CPU_MIN or HEAVY.search(p["args"]):
+        # heavy = sustained CPU, or an engine/build binary (matched on the executable, not its arguments),
+        # or an offscreen engine capture (flags in the arguments)
+        if p["cpu"] >= CPU_MIN or HEAVY.search(p["comm"]) or CAPTURE_FLAGS.search(p["args"]):
             out.append(pid)
     return out, front
 
