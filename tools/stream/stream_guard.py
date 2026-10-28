@@ -4,9 +4,12 @@
   stream_guard.py on  [--until HH:MM]   set the STREAMING flag and background every heavy non-stream job
   stream_guard.py off                   clear the flag and restore the jobs it backgrounded
   stream_guard.py status
-  stream_guard.py window [--until HH:MM] [--interval S]
+  stream_guard.py window [--until HH:MM] [--interval S] [--hard-until HH:MM]
         `on`, then re-apply every S seconds (new jobs started mid-window get backgrounded, the frontmost
-        app is always restored) until HH:MM local time or until the flag is removed, then `off`.
+        app is always restored) until HH:MM local time AND the stream is actually over (Streamlabs/OBS
+        log shows no live RTMP connection), or the flag is removed, or --hard-until (default 17:00).
+  stream_guard.py auto                  for a periodic LaunchAgent: arm the guard when a stream is live
+        outside the window, disarm it when that stream ends. Does nothing while a window run owns the flag.
 
 What "priority" means on macOS (no sudo needed):
   * every own-user process that is heavy (CPU >= STREAM_GUARD_CPU_MIN %, default 15) or matches the
@@ -25,6 +28,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
 
 DIR = os.environ.get("GPU_LOCK_DIR", os.path.expanduser("~/.cache/gpu-slot"))
 FLAG = os.path.join(DIR, "STREAMING")
@@ -120,6 +124,35 @@ def descendants(table, root):
                 out.add(k)
                 stack.append(k)
     return out
+
+
+SLOBS_LOGS = Path.home() / "Library/Application Support/slobs-client/node-obs/logs"
+OBS_LOGS = Path.home() / "Library/Application Support/obs-studio/logs"
+RE_LIVE = re.compile(r"Connection to rtmps?://\S+ success")
+RE_STOP = re.compile(r"Output '[^']*': stopping")
+
+
+def streaming_active():
+    """True if the newest Streamlabs/OBS engine log shows a live RTMP connection after the last stop."""
+    for d in (SLOBS_LOGS, OBS_LOGS):
+        logs = sorted(d.glob("*.txt"), key=lambda p: p.stat().st_mtime) if d.is_dir() else []
+        if not logs:
+            continue
+        newest = logs[-1]
+        if time.time() - newest.stat().st_mtime > 6 * 3600:
+            continue
+        try:
+            text = newest.read_text(errors="ignore")
+        except OSError:
+            continue
+        last_live = max((m.end() for m in RE_LIVE.finditer(text)), default=-1)
+        last_stop = max((m.end() for m in RE_STOP.finditer(text)), default=-1)
+        if last_live > last_stop:
+            proc = "obs64" if d == SLOBS_LOGS else "OBS"
+            r = run(["pgrep", "-x", proc])
+            if r is not None and r.returncode == 0:
+                return True
+    return False
 
 
 def read_flag():
@@ -275,17 +308,30 @@ def parse_until(s):
     return t
 
 
-def cmd_window(until_s, interval):
+def cmd_window(until_s, interval, hard_until_s="17:00"):
     until = parse_until(until_s)
+    hard = parse_until(hard_until_s)
     if until is None:
         print("window needs --until HH:MM", file=sys.stderr)
         return 2
-    if datetime.now() >= until:
-        log("window: already past %s, nothing to do" % until_s)
+    if datetime.now() >= until and not streaming_active():
+        log("window: already past %s and no live stream, nothing to do" % until_s)
         return 0
     cmd_on(until=until.astimezone().isoformat(timespec="minutes"), mode="window")
+    extended = False
     try:
-        while datetime.now() < until:
+        while True:
+            now = datetime.now()
+            if now >= hard:
+                log("window: hard stop at %s" % hard_until_s)
+                break
+            if now >= until:
+                if streaming_active():
+                    if not extended:
+                        log("window: past %s but the stream is still live; holding the guard" % until_s)
+                        extended = True
+                else:
+                    break
             time.sleep(interval)
             flag = read_flag()
             if flag is None:
@@ -295,7 +341,24 @@ def cmd_window(until_s, interval):
     finally:
         if read_flag() is not None:
             cmd_off()
-    log("window: ended at %s" % until_s)
+    log("window: ended (%s)" % ("stream ended" if extended else until_s))
+    return 0
+
+
+def cmd_auto():
+    flag = read_flag()
+    live = streaming_active()
+    if flag is None:
+        if live:
+            log("auto: live stream detected outside the window, arming")
+            return cmd_on(until=None, mode="auto")
+        return 0
+    if flag.get("mode") == "auto":
+        if live:
+            apply(flag)
+        else:
+            log("auto: stream ended, disarming")
+            return cmd_off()
     return 0
 
 
@@ -304,13 +367,15 @@ def main(argv):
         print(__doc__)
         return 2
     sub, args = argv[1], argv[2:]
-    until, interval = None, 60.0
+    until, interval, hard_until = None, 60.0, "17:00"
     i = 0
     while i < len(args):
         if args[i] == "--until" and i + 1 < len(args):
             until = args[i + 1]; i += 2
         elif args[i] == "--interval" and i + 1 < len(args):
             interval = float(args[i + 1]); i += 2
+        elif args[i] == "--hard-until" and i + 1 < len(args):
+            hard_until = args[i + 1]; i += 2
         else:
             print("unknown option %r" % args[i], file=sys.stderr)
             return 2
@@ -321,7 +386,9 @@ def main(argv):
     if sub == "status":
         return cmd_status()
     if sub == "window":
-        return cmd_window(until, interval)
+        return cmd_window(until, interval, hard_until)
+    if sub == "auto":
+        return cmd_auto()
     print("unknown subcommand %r" % sub, file=sys.stderr)
     return 2
 

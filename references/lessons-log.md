@@ -75,3 +75,15 @@ Append a dated entry after every loop (or every few hours during one). Newest la
   - The owner streams 11-13 ET daily. `stream_guard.py` runs the window: STREAMING flag, cap 30, one capture slot, heavy jobs backgrounded with `taskpolicy -b`, the frontmost app and Streamlabs untouched.
   - macOS has no GPU priority control. Headroom comes from capping and serialising renderers, not from boosting the stream.
 
+## 2026-10-28 13:10 — live test: one agent render next to a streamed game is still too much
+
+- With the morning fixes (dynamic audio buffering, Enhanced Broadcasting off, 48 kHz) the stream ran at 2.1 % lagged frames and zero mic restarts under a pinned GPU, versus 37.6 % and 44 restarts before. Twitch-side captures (streamlink + ffmpeg) showed zero video hitches in every sample.
+- Residual: hard mid-word audio cuts of 60-180 ms in the Twitch output, measured as speech-to-digital-zero within 10 ms. Worst (6 cuts in 6 s of speech) with an Unreal game at 30 fps plus one agent Unity capture on the GPU; 2 cuts with only an agent Godot capture; the Streamlabs log stayed clean, so the loss is upstream of its mixer. The USB bus is not shared (each device has its own XHCI controller on the Studio), so bus contention is ruled out.
+- The audio buffer growth (128 -> 533 ms) came from the macOS Screen Capture sources, not the mic: ScreenCaptureKit audio stalls under GPU load and drags the whole mix. Capture the game window, not the 3440x1440 display.
+- Two self-inflicted incidents: Elgato Wave Link launched as a "buffer" took over the Wave XLR, muted the Streamlabs input, then glitched it; and the guard window ended at 13:05 while the owner was still live, so an agent capture started in the gap. Also: the Enhanced Broadcasting checkbox in the Go Live window only saves when the stream is confirmed.
+- Rules:
+  - While the owner streams, agent renders are ZERO, not one. `gpu_slot` opens no capture slot while `STREAMING` exists (`GPU_SLOT_STREAMING_SLOTS=1` is an explicit owner exception).
+  - The guard follows the stream, not the clock: it holds past the window while the Streamlabs/OBS log shows a live RTMP connection, and a 5-minute auto check arms it for off-schedule streams.
+  - Never launch Wave Link or any second audio engine on the stream mic from an agent. Never change a live source's device.
+  - Stream scenes capture the game window, not the whole display; measure the stream from the viewer side (`streamlink` 40 s + silence/zero analysis), not from the preview.
+

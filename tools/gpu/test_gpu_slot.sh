@@ -243,6 +243,27 @@ check "an explicit --max-fps is left alone" bash -c "grep -q -- '--max-fps 120' 
 GPU_SLOT_FPS_CAP=0 $GS capture --label G3 -- "$T/Fake.app/Contents/MacOS/game" --bar >/dev/null 2>&1
 check "GPU_SLOT_FPS_CAP=0 injects nothing" bash -c "! grep -q -- '--max-fps' '$T/godot.args'"
 echo '{"mode":"test"}' > "$GPU_SLOT_DIR/STREAMING"
+GPU_SLOT_STREAMING_SLOTS=1 $GS capture --label GS -- "$T/Fake.app/Contents/MacOS/game" >/dev/null 2>&1
+check "while STREAMING flag exists the cap is 30 (explicit 1-slot exception)" grep -q -- '--max-fps 30' "$T/godot.args"
+check "child sees streaming=1" grep -q 'streaming=1' "$T/godot.env"
+check "status reports the STREAMING flag with 0 slots" bash -c "'$HERE/gpu_status.sh' | grep -q 'STREAMING flag set -> 0 slot'"
+$GS capture --label SW -- $JOB SW 0.3 & PSW=$!
+sleep 1.2
+check "a capture does NOT start at all while streaming (0 slots): it waits" test ! -e "$T/SW.start"
+check "the waiter logs streaming=true" grep -q 'event=wait.*streaming=true' "$GPU_SLOT_LOG"
+rm -f "$GPU_SLOT_DIR/STREAMING"
+wait $PSW; RC=$?
+check "the waiting capture runs as soon as the flag is removed, exit 0" test $RC -eq 0 -a -e "$T/SW.end"
+$GS capture --label G -- "$T/Fake.app/Contents/MacOS/game" --foo >/dev/null 2>&1
+check "godot launch gets --max-fps 60 appended (default cap)" grep -q -- '--foo --max-fps 60' "$T/godot.args"
+check "child sees GPU_SLOT_FPS_CAP=60 streaming=0" grep -q 'cap=60 streaming=0' "$T/godot.env"
+$GS capture --label U -- "$T/UE/Binaries/Mac/FakeGame" -game -dpcvars=r.ScreenPercentage=50 >/dev/null 2>&1
+check "unreal launch merges t.MaxFPS=60 into existing -dpcvars" grep -q -- '-dpcvars=r.ScreenPercentage=50,t.MaxFPS=60' "$T/ue.args"
+$GS capture --label G2 -- "$T/Fake.app/Contents/MacOS/game" --max-fps 120 >/dev/null 2>&1
+check "an explicit --max-fps is left alone" bash -c "grep -q -- '--max-fps 120' '$T/godot.args' && ! grep -q -- '--max-fps 60' '$T/godot.args'"
+GPU_SLOT_FPS_CAP=0 $GS capture --label G3 -- "$T/Fake.app/Contents/MacOS/game" --bar >/dev/null 2>&1
+check "GPU_SLOT_FPS_CAP=0 injects nothing" bash -c "! grep -q -- '--max-fps' '$T/godot.args'"
+echo '{"mode":"test"}' > "$GPU_SLOT_DIR/STREAMING"
 $GS capture --label GS -- "$T/Fake.app/Contents/MacOS/game" >/dev/null 2>&1
 check "while STREAMING flag exists the cap is 30" grep -q -- '--max-fps 30' "$T/godot.args"
 check "child sees streaming=1" grep -q 'streaming=1' "$T/godot.env"
