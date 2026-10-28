@@ -65,3 +65,13 @@ Append a dated entry after every loop (or every few hours during one). Newest la
   - Detect starvation automatically and act without waiting for an agent's judgement. The signature is a pinned GPU, WindowServer CPU collapsing toward 0, and a tiny screencapture that cannot finish within a few seconds. On that signal, pause launches and stop the newest engine (SIGTERM first).
   - Treat any "desktop cannot render" alert as an emergency.
   - Run the orchestrator in `tmux` or another detached host, so a GUI reset cannot take the loop down with it.
+
+## 2026-10-28 12:30 — an uncapped game build broke the owner's stream mic
+
+- A Godot capture (Orchard Reach, 3440x1440, no frame cap) sat at 100 % GPU for the whole session. Streamlabs on the same Mac logged 37.6 % lagged frames and 44 mic restarts in four minutes: OBS clocks its audio mixer off the render loop, so a starved renderer drops the mic while every other app's mic keeps working.
+- Low Latency Audio Buffering Mode (a DeckLink/NDI option) had been switched on as an earlier "fix"; it turned every stall into a hard mic cut. Off is correct for streaming; dynamic buffering rides out stalls.
+- Rules:
+  - Cap every agent-launched engine at 60 fps; nothing in a loop needs more, and an uncapped renderer takes the whole GPU by design. `gpu_slot` now injects the cap.
+  - The owner streams 11-13 ET daily. `stream_guard.py` runs the window: STREAMING flag, cap 30, one capture slot, heavy jobs backgrounded with `taskpolicy -b`, the frontmost app and Streamlabs untouched.
+  - macOS has no GPU priority control. Headroom comes from capping and serialising renderers, not from boosting the stream.
+

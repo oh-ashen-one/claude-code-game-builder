@@ -7,5 +7,6 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 DEST=${GPU_LOCK_DIR:-$HOME/.cache/gpu-slot}/bin
 mkdir -p "$DEST"
 cp "$HERE/gpu_slot.sh" "$HERE/gpu_slot.py" "$HERE/gpu_status.sh" "$DEST/"
+[ -f "$HERE/../stream/stream_guard.py" ] && cp "$HERE/../stream/stream_guard.py" "$DEST/"
 chmod +x "$DEST"/*
 echo "installed -> $DEST"

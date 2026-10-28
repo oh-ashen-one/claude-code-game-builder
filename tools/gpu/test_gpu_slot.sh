@@ -221,6 +221,42 @@ $GS capture --label Z -- $JOB Z 0.1; RC=$?
 check "capture not blocked by a queue record whose PID was reused (start time differs)" test $RC -eq 0 -a -e "$T/Z.end"
 check "  ... and it was logged as stale-recovered dead_label=impostor" grep -q 'stale-recovered.*dead_label=impostor' "$GPU_SLOT_LOG"
 
+echo "== (h) frame cap injection + STREAMING flag =="
+setutil 5
+mkdir -p "$T/Fake.app/Contents/MacOS" "$T/Fake.app/Contents/Resources" "$T/UE/Binaries/Mac"
+touch "$T/Fake.app/Contents/Resources/game.pck"
+cat > "$T/Fake.app/Contents/MacOS/game" <<SH
+#!/bin/bash
+echo "\$@" > "$T/godot.args"; echo "cap=\$GPU_SLOT_FPS_CAP streaming=\$GPU_SLOT_STREAMING" > "$T/godot.env"
+SH
+cp "$T/Fake.app/Contents/MacOS/game" "$T/UE/Binaries/Mac/FakeGame"
+sed -i '' "s|godot\.|ue.|g" "$T/UE/Binaries/Mac/FakeGame"
+chmod +x "$T/Fake.app/Contents/MacOS/game" "$T/UE/Binaries/Mac/FakeGame"
+rm -f "$GPU_SLOT_DIR/STREAMING"
+$GS capture --label G -- "$T/Fake.app/Contents/MacOS/game" --foo >/dev/null 2>&1
+check "godot launch gets --max-fps 60 appended (default cap)" grep -q -- '--foo --max-fps 60' "$T/godot.args"
+check "child sees GPU_SLOT_FPS_CAP=60 streaming=0" grep -q 'cap=60 streaming=0' "$T/godot.env"
+$GS capture --label U -- "$T/UE/Binaries/Mac/FakeGame" -game -dpcvars=r.ScreenPercentage=50 >/dev/null 2>&1
+check "unreal launch merges t.MaxFPS=60 into existing -dpcvars" grep -q -- '-dpcvars=r.ScreenPercentage=50,t.MaxFPS=60' "$T/ue.args"
+$GS capture --label G2 -- "$T/Fake.app/Contents/MacOS/game" --max-fps 120 >/dev/null 2>&1
+check "an explicit --max-fps is left alone" bash -c "grep -q -- '--max-fps 120' '$T/godot.args' && ! grep -q -- '--max-fps 60' '$T/godot.args'"
+GPU_SLOT_FPS_CAP=0 $GS capture --label G3 -- "$T/Fake.app/Contents/MacOS/game" --bar >/dev/null 2>&1
+check "GPU_SLOT_FPS_CAP=0 injects nothing" bash -c "! grep -q -- '--max-fps' '$T/godot.args'"
+echo '{"mode":"test"}' > "$GPU_SLOT_DIR/STREAMING"
+$GS capture --label GS -- "$T/Fake.app/Contents/MacOS/game" >/dev/null 2>&1
+check "while STREAMING flag exists the cap is 30" grep -q -- '--max-fps 30' "$T/godot.args"
+check "child sees streaming=1" grep -q 'streaming=1' "$T/godot.env"
+check "status reports the STREAMING flag" bash -c "'$HERE/gpu_status.sh' | grep -q 'STREAMING flag set'"
+$GS capture --label S1 -- $JOB S1 1.2 & PS1=$!
+sleep 0.4
+$GS capture --label S2 -- $JOB S2 0.3 & PS2=$!
+sleep 0.5
+check "second capture WAITS while streaming (only one slot)" test ! -e "$T/S2.start"
+wait $PS1 $PS2
+check "second capture ran after the first finished" ge "$(val S2.start)" "$(python3 -c "print($(val S1.end) - 0.05)")"
+rm -f "$GPU_SLOT_DIR/STREAMING"
+check "capture result JSON records the applied cap and the streaming state" bash -c "grep -q '\"fps_cap_engine\": \"godot\".*\"fps_cap_applied\": true' '$GPU_SLOT_DIR/runs.jsonl' && grep -q '\"streaming\": true, \"fps_cap\": 30' '$GPU_SLOT_DIR/runs.jsonl'"
+
 echo
 echo "RESULT: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ]

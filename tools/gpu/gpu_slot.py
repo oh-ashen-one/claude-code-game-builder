@@ -27,9 +27,16 @@ Environment (all optional; tests shrink the timings):
   GPU_SLOT_LABEL, GPU_SLOT_QUIET=1,
   GPU_SLOT_MOCK_UTIL=<int> | GPU_SLOT_MOCK_UTIL_FILE=<file holding an int>   (replaces ioreg),
   GPU_SLOT_UNREAL_PATTERN=<regex on the command line> (replaces "executable is UnrealEditor"),
-  GPU_SLOT_CAPTURE_PATTERN=<regex> (which Unreal instances count as capture processes).
+  GPU_SLOT_CAPTURE_PATTERN=<regex> (which Unreal instances count as capture processes),
+  GPU_SLOT_FPS_CAP=60 (frame cap injected into every wrapped engine launch; 0 disables),
+  GPU_SLOT_FPS_CAP_STREAMING=30 (cap while the STREAMING flag file exists in the state dir).
+Frame cap (owner rule 2026-10-28): every agent-launched game/engine runs capped. Godot gets
+`--max-fps N`, Unreal `-dpcvars=t.MaxFPS=N`; Unity players have no CLI knob (the build must set
+Application.targetFrameRate, the cap is exported as $GPU_SLOT_FPS_CAP). While <state dir>/STREAMING
+exists (stream_guard.py, daily stream window) the cap drops to 30 and only ONE capture slot is open.
 """
 import errno
+import glob
 import fcntl
 import json
 import os
@@ -76,12 +83,15 @@ class Cfg:
         self.quiet = e.get("GPU_SLOT_QUIET") == "1"
         self.unreal_pat = e.get("GPU_SLOT_UNREAL_PATTERN") or None
         self.capture_pat = re.compile(e.get("GPU_SLOT_CAPTURE_PATTERN") or DEFAULT_CAPTURE_PAT)
+        self.fps_cap = int(_f("GPU_SLOT_FPS_CAP", 60))
+        self.fps_cap_streaming = int(_f("GPU_SLOT_FPS_CAP_STREAMING", 30))
         self.mock_util = e.get("GPU_SLOT_MOCK_UTIL")
         self.mock_util_file = e.get("GPU_SLOT_MOCK_UTIL_FILE")
         self.holders = os.path.join(self.dir, "holders")
         self.queue = os.path.join(self.dir, "queue")
         self.locks = os.path.join(self.dir, "locks")
         self.perf_lock = os.path.join(self.locks, "perf.lock")
+        self.streaming_flag = os.path.join(self.dir, "STREAMING")
 
     def ensure_dirs(self):
         for d in (self.dir, self.holders, self.queue, self.locks, os.path.dirname(self.log)):
@@ -121,6 +131,57 @@ def read_util(cfg):
 
 def fmt_util(u):
     return "?" if u is None else ("%d" % u if float(u).is_integer() else "%.1f" % u)
+
+
+def streaming(cfg):
+    """True while the owner's stream window flag exists (written by tools/stream/stream_guard.py)."""
+    return os.path.exists(cfg.streaming_flag)
+
+
+def engine_kind(cmd):
+    """Best-effort engine detection from the wrapped command: 'godot' | 'unreal' | 'unity' | None."""
+    if not cmd:
+        return None
+    exe = cmd[0]
+    base = os.path.basename(exe)
+    joined = " ".join(cmd)
+    app = None
+    m = re.match(r"(.*\.app)/Contents/MacOS/", exe)
+    if m:
+        app = m.group(1)
+    if re.search(r"godot", base, re.I) or "--main-pack" in cmd:
+        return "godot"
+    if app and glob.glob(os.path.join(app, "Contents", "Resources", "*.pck")):
+        return "godot"
+    if os.path.exists(exe + ".pck") or os.path.exists(os.path.splitext(exe)[0] + ".pck"):
+        return "godot"
+    if re.search(r"UnrealEditor|UE4Editor|/Binaries/Mac/|\.uproject(\s|$)", joined) or re.search(r"(^|\s)-game(\s|$)", joined):
+        return "unreal"
+    if app and os.path.isdir(os.path.join(app, "Contents", "Resources", "Data")):
+        return "unity"
+    if re.search(r"/Unity\.app/|/Unity/Hub/", joined):
+        return "unity"
+    return None
+
+
+def apply_fps_cap(cmd, cap, kind):
+    """Return (cmd, applied: bool). Never overrides a cap the caller already passed."""
+    if not cap or cap <= 0 or not kind:
+        return list(cmd), False
+    cmd = list(cmd)
+    if kind == "godot":
+        if "--max-fps" in cmd or any(a.startswith("--max-fps=") for a in cmd):
+            return cmd, False
+        return cmd + ["--max-fps", str(cap)], True
+    if kind == "unreal":
+        if any("t.MaxFPS" in a for a in cmd):
+            return cmd, False
+        for i, a in enumerate(cmd):
+            if a.lower().startswith("-dpcvars="):
+                cmd[i] = a + (",t.MaxFPS=%d" % cap)
+                return cmd, True
+        return cmd + ["-dpcvars=t.MaxFPS=%d" % cap], True
+    return cmd, False   # unity: no CLI knob; exported via $GPU_SLOT_FPS_CAP
 
 
 def proc_start(pid):
@@ -479,7 +540,15 @@ def run_wrapped(cls, label, json_path, wait_timeout, cmd):
                       unreal_before={"instances": len(ue_before),
                                      "captures": sum(1 for p in ue_before if p["kind"] == "capture"),
                                      "editors": sum(1 for p in ue_before if p["kind"] == "editor")})
+        live = streaming(cfg)
+        cap = cfg.fps_cap_streaming if live else cfg.fps_cap
+        kind = engine_kind(cmd)
+        run_cmd, cap_applied = apply_fps_cap(cmd, cap, kind)
+        result.update(streaming=live, fps_cap=cap, fps_cap_engine=kind, fps_cap_applied=cap_applied)
+        log("fps-cap", engine=kind or "unknown", cap=cap, applied=str(cap_applied).lower(),
+            streaming=str(live).lower(), echo=(kind == "unity" and cap > 0))
         env = dict(os.environ)
+        env.update(GPU_SLOT_FPS_CAP=str(cap), GPU_SLOT_STREAMING="1" if live else "0")
         env.update(GPU_SLOT_HELD=cls, GPU_SLOT_LABEL=label, GPU_SLOT_WAIT_S=str(wait_s),
                    GPU_SLOT_UTIL_BEFORE=fmt_util(util_before),
                    GPU_SLOT_INSTANCES_BEFORE=str(len(ue_before)),
@@ -508,7 +577,7 @@ def run_wrapped(cls, label, json_path, wait_timeout, cmd):
         t_start = time.time()
         m_start = time.monotonic()
         try:
-            child = subprocess.Popen(cmd, env=env, start_new_session=True)
+            child = subprocess.Popen(run_cmd, env=env, start_new_session=True)
         except FileNotFoundError:
             sys.stderr.write("gpu_slot: command not found: %s\n" % cmd[0])
             result.update(exit_code=127, outcome="cmd-not-found")
@@ -613,7 +682,8 @@ def try_acquire_capture(cfg):
     sh = try_flock(cfg.perf_lock, fcntl.LOCK_SH)
     if sh is None:
         return None
-    for i in range(cfg.slots):
+    slots = 1 if streaming(cfg) else cfg.slots
+    for i in range(slots):
         fd = try_flock(os.path.join(cfg.locks, "capture.%d.lock" % i), fcntl.LOCK_EX)
         if fd is not None:
             return [sh, fd], str(i)
@@ -668,7 +738,8 @@ def cmd_status(as_json=False):
     print("Perf lock:     %s" % ("HELD by pid %s label=%s state=%s for %ds" % (
         perf_h[0]["pid"], perf_h[0].get("label"), perf_h[0].get("state"), nowe - perf_h[0].get("since_epoch", nowe))
         if perf_h else "free"))
-    print("Capture slots: %d/%d in use" % (len(cap_h), cfg.slots))
+    print("Capture slots: %d/%d in use%s" % (len(cap_h), 1 if streaming(cfg) else cfg.slots,
+          "   STREAMING flag set -> 1 slot, fps cap %d" % cfg.fps_cap_streaming if streaming(cfg) else "   (fps cap %d)" % cfg.fps_cap))
     print("Holders (%d):" % len(holders))
     for h in holders:
         print("  %-7s slot=%-4s pid=%-6s label=%-12s state=%-9s for %5ds%s  cmd=%s" % (
