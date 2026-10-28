@@ -29,11 +29,15 @@ Environment (all optional; tests shrink the timings):
   GPU_SLOT_UNREAL_PATTERN=<regex on the command line> (replaces "executable is UnrealEditor"),
   GPU_SLOT_CAPTURE_PATTERN=<regex> (which Unreal instances count as capture processes),
   GPU_SLOT_FPS_CAP=60 (frame cap injected into every wrapped engine launch; 0 disables),
-  GPU_SLOT_FPS_CAP_STREAMING=30 (cap while the STREAMING flag file exists in the state dir).
+  GPU_SLOT_FPS_CAP_STREAMING=30 (cap while the STREAMING flag file exists in the state dir),
+  GPU_SLOT_STREAMING_SLOTS=0 (capture slots open while STREAMING: 0 = agent captures WAIT until the
+  owner is off stream; set 1 only as an explicit owner exception).
 Frame cap (owner rule 2026-10-28): every agent-launched game/engine runs capped. Godot gets
 `--max-fps N`, Unreal `-dpcvars=t.MaxFPS=N`; Unity players have no CLI knob (the build must set
 Application.targetFrameRate, the cap is exported as $GPU_SLOT_FPS_CAP). While <state dir>/STREAMING
-exists (stream_guard.py, daily stream window) the cap drops to 30 and only ONE capture slot is open.
+exists (stream_guard.py, stream window / live detection) the cap drops to 30 and NO capture slot is open:
+agent captures queue until the flag is gone (owner decision 2026-10-28: one agent render next to a
+streamed game still pinned the GPU and glitched the stream).
 """
 import errno
 import glob
@@ -85,6 +89,7 @@ class Cfg:
         self.capture_pat = re.compile(e.get("GPU_SLOT_CAPTURE_PATTERN") or DEFAULT_CAPTURE_PAT)
         self.fps_cap = int(_f("GPU_SLOT_FPS_CAP", 60))
         self.fps_cap_streaming = int(_f("GPU_SLOT_FPS_CAP_STREAMING", 30))
+        self.streaming_slots = int(_f("GPU_SLOT_STREAMING_SLOTS", 0))
         self.mock_util = e.get("GPU_SLOT_MOCK_UTIL")
         self.mock_util_file = e.get("GPU_SLOT_MOCK_UTIL_FILE")
         self.holders = os.path.join(self.dir, "holders")
@@ -481,6 +486,7 @@ def run_wrapped(cls, label, json_path, wait_timeout, cmd):
                 holders = list_records(cfg.holders)
                 log("wait", phase="queue", waited_s=round(waited, 1), ahead=len(ahead),
                     holders=",".join("%s:%s" % (h.get("class"), h.get("pid")) for h in holders),
+                    streaming=str(streaming(cfg)).lower(),
                     echo=(last_log == 0.0 or waited - last_log >= cfg.wait_log_every))
                 last_log = waited
             time.sleep(cfg.poll)
@@ -682,7 +688,10 @@ def try_acquire_capture(cfg):
     sh = try_flock(cfg.perf_lock, fcntl.LOCK_SH)
     if sh is None:
         return None
-    slots = 1 if streaming(cfg) else cfg.slots
+    slots = cfg.streaming_slots if streaming(cfg) else cfg.slots
+    if slots <= 0:
+        release_fd(sh)
+        return None
     for i in range(slots):
         fd = try_flock(os.path.join(cfg.locks, "capture.%d.lock" % i), fcntl.LOCK_EX)
         if fd is not None:
@@ -738,8 +747,10 @@ def cmd_status(as_json=False):
     print("Perf lock:     %s" % ("HELD by pid %s label=%s state=%s for %ds" % (
         perf_h[0]["pid"], perf_h[0].get("label"), perf_h[0].get("state"), nowe - perf_h[0].get("since_epoch", nowe))
         if perf_h else "free"))
-    print("Capture slots: %d/%d in use%s" % (len(cap_h), 1 if streaming(cfg) else cfg.slots,
-          "   STREAMING flag set -> 1 slot, fps cap %d" % cfg.fps_cap_streaming if streaming(cfg) else "   (fps cap %d)" % cfg.fps_cap))
+    print("Capture slots: %d/%d in use%s" % (len(cap_h), cfg.streaming_slots if streaming(cfg) else cfg.slots,
+          "   STREAMING flag set -> %d slot(s), captures %s, fps cap %d" % (
+              cfg.streaming_slots, "WAIT" if cfg.streaming_slots <= 0 else "allowed", cfg.fps_cap_streaming)
+          if streaming(cfg) else "   (fps cap %d)" % cfg.fps_cap))
     print("Holders (%d):" % len(holders))
     for h in holders:
         print("  %-7s slot=%-4s pid=%-6s label=%-12s state=%-9s for %5ds%s  cmd=%s" % (
