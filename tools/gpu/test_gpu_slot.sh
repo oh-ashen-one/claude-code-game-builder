@@ -18,7 +18,12 @@ export GPU_SLOT_POLL=0.1 GPU_SLOT_CALM_SECONDS=1.0 GPU_SLOT_SAMPLE_INTERVAL=0.2 
 export GPU_SLOT_MOCK_UTIL_FILE="$T/util"
 export GPU_SLOT_UNREAL_PATTERN="FAKEUE_$TOKEN" GPU_SLOT_CAPTURE_PATTERN='-game'
 export GPU_SLOT_LABEL=test
-unset GPU_SLOT_HELD GPU_SLOT_JSON
+# isolation from the live machine: only processes carrying this run's token can count as GPU clients
+export GPU_SLOT_GPU_IGNORE_PATTERN="^(?!.*$TOKEN)"
+# capture launch gate at test speed (defaults: util < 85 for 10 s, 20 s cooldown, 180 s settle budget)
+export GPU_SLOT_CAPTURE_CALM_SECONDS=0.2 GPU_SLOT_LAUNCH_COOLDOWN=0.01 GPU_SLOT_CAPTURE_SETTLE_TIMEOUT=30
+unset GPU_SLOT_HELD GPU_SLOT_JSON GPU_SLOT_MOCK_STUCK_FILE GPU_SLOT_ML_PATTERN GPU_SLOT_GPU_PATTERN
+unset GPU_SLOT_CAPTURE_UTIL_MAX GPU_SLOT_CAPTURE_SLOTS
 
 cat > "$T/job.py" <<'PY'
 import sys, time
@@ -255,6 +260,184 @@ rm -f "$GPU_SLOT_DIR/STREAMING"
 wait $PSW; RC=$?
 check "the waiting capture runs as soon as the flag is removed, exit 0" test $RC -eq 0 -a -e "$T/SW.end"
 check "capture result JSON records the applied cap and the streaming state" bash -c "grep -q '\"fps_cap_engine\": \"godot\".*\"fps_cap_applied\": true' '$GPU_SLOT_DIR/runs.jsonl' && grep -q '\"streaming\": true, \"fps_cap\": 30' '$GPU_SLOT_DIR/runs.jsonl'"
+
+echo "== (i) GPU client cap, capture util gate, cooldown, PAUSED, stuck engines =="
+fake_gpu() { python3 -c 'import time,sys;time.sleep(float(sys.argv[1]))' "$1" "$2_$TOKEN" & FAKE_PID=$!; }
+export GPU_SLOT_ML_PATTERN="FAKEML_$TOKEN" GPU_SLOT_GPU_PATTERN="FAKEGPU_$TOKEN"
+setutil 20
+echo "-- (i1) two foreign GPU clients (ml + other) hold a capture at cap-full; it runs when one exits"
+fake_gpu 60 FAKEML; ML=$FAKE_PID
+fake_gpu 60 FAKEGPU; OG=$FAKE_PID
+sleep 0.3
+check "status --json classifies the fake trainer as ml and the pattern client as other" python3 - "$HERE" "$ML" "$OG" <<'PY'
+import json, subprocess, sys
+here, ml, og = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+s = json.loads(subprocess.run([here + "/gpu_status.sh", "--json"], capture_output=True, text=True).stdout)
+k = {c["pid"]: c["kind"] for c in s["gpu_clients"]}
+print("    ", k, s["gpu_clients_by_kind"])
+sys.exit(0 if k.get(ml) == "ml" and k.get(og) == "other" and s["gpu_client_cap"] == 2 else 1)
+PY
+$GS capture --label CF --json "$T/cf.json" -- sh -c 'echo "$GPU_SLOT_INSTANCES_BEFORE" > "$0/cf.inst"; exec '"$JOB"' CF 0.2' "$T" & PCF=$!
+sleep 1.2
+check "capture does NOT launch while 2 foreign GPU clients run (cap 2)" test ! -e "$T/CF.start"
+check "log: wait phase=cap-full clients=<pid:kind,...> naming both" \
+  bash -c "grep 'label=CF' '$GPU_SLOT_LOG' | grep 'event=wait' | grep 'phase=cap-full' | grep -q 'clients=.*$ML:ml.*$OG:other'"
+check "status shows the waiting capture holding its slot in state gating" bash -c "'$HERE/gpu_status.sh' | grep -q 'label=CF.*state=gating'"
+kill $ML; wait $ML 2>/dev/null; T_ML_END="$(now)"
+wait $PCF; RC=$?
+check "capture runs once one foreign client exits (exit 0, start >= exit time)" \
+  bash -c "test $RC -eq 0 && python3 -c 'import sys;sys.exit(0 if $(val CF.start) >= $T_ML_END - 0.05 else 1)'"
+check "GPU_SLOT_INSTANCES_BEFORE = total GPU clients (1 foreign left)" test "$(val cf.inst)" = 1
+check "result json: gpu_clients_before total+by_kind, gpu_clients_max_during" python3 - "$T/cf.json" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+g = r["gpu_clients_before"]
+print("    ", g, "max_during=%s" % r["gpu_clients_max_during"])
+sys.exit(0 if g["total"] == 1 and g["by_kind"] == {"other": 1} and r["gpu_clients_max_during"] >= 1 else 1)
+PY
+check "release log line carries gpu_clients_before / by_kind / max_during" \
+  bash -c "grep 'label=CF' '$GPU_SLOT_LOG' | grep 'event=release' | grep -q 'gpu_clients_before=1 .*gpu_clients_by_kind=other:1 .*gpu_clients_max_during='"
+fake_gpu 60 FAKEML; ML=$FAKE_PID
+GPU_SLOT_CAPTURE_SLOTS=1 $GS capture --label CF3 --timeout 1.0 --json "$T/cf3.json" -- $JOB CF3 0.1; RC=$?
+check "cap-full past the wait timeout => exit 75, outcome cap-full-timeout, command not run" \
+  bash -c "test $RC -eq 75 -a ! -e '$T/CF3.start' && grep -q '\"outcome\": \"cap-full-timeout\"' '$T/cf3.json'"
+kill $ML $OG 2>/dev/null; wait $ML $OG 2>/dev/null
+
+echo "-- (i2) capture util gate: util 100 holds the slot without running, util 20 lets it run"
+setutil 100
+$GS capture --label UB -- $JOB UB 0.2 & PUB=$!
+sleep 1.2
+check "capture at util 100 has NOT started" test ! -e "$T/UB.start"
+check "log: wait phase=settle with util=100" bash -c "grep 'label=UB' '$GPU_SLOT_LOG' | grep 'event=wait' | grep 'phase=settle' | grep -q 'util=100'"
+setutil 20; T_LOW="$(now)"
+wait $PUB; RC=$?
+check "capture runs after util drops (exit 0, start >= drop + calm 0.2 - 0.05)" \
+  bash -c "test $RC -eq 0 && python3 -c 'import sys;sys.exit(0 if $(val UB.start) >= $T_LOW + 0.15 else 1)'"
+
+echo "-- (i3) settle budget expires: exit 75, skipped-busy, command never started"
+setutil 100
+GPU_SLOT_CAPTURE_SETTLE_TIMEOUT=1 $GS capture --label ST --json "$T/st.json" -- $JOB ST 0.1; RC=$?
+check "settle timeout => exit 75 and the command was never started" test $RC -eq 75 -a ! -e "$T/ST.start"
+check "  ... outcome skipped-busy, contaminated, log has settle-timeout" bash -c "python3 -c \"import json,sys;r=json.load(open('$T/st.json'));sys.exit(0 if r['outcome']=='skipped-busy' and r['contaminated'] and r['exit_code']==75 else 1)\" && grep 'label=ST' '$GPU_SLOT_LOG' | grep -q 'event=settle-timeout'"
+setutil 20
+
+echo "-- (i4) launch cooldown after a release"
+GPU_SLOT_LAUNCH_COOLDOWN=0.01 $GS capture --label CD1 -- $JOB CD1 0.1
+REL="$(cat "$GPU_SLOT_DIR/last_release")"
+GPU_SLOT_LAUNCH_COOLDOWN=1.5 $GS capture --label CD2 -- $JOB CD2 0.1; RC=$?
+check "last_release written at release (>= end of CD1)" ge "$REL" "$(python3 -c "print($(val CD1.end) - 0.05)")"
+check "next capture launched >= last release + cooldown 1.5 s" \
+  bash -c "test $RC -eq 0 && python3 -c 'import sys;sys.exit(0 if $(val CD2.start) >= $REL + 1.5 - 0.05 else 1)'"
+check "log: settle wait reports cooldown_left_s" bash -c "grep 'label=CD2' '$GPU_SLOT_LOG' | grep 'phase=settle' | grep -q 'cooldown_left_s=1'"
+
+echo "-- (i5) PAUSED switch: pause blocks every class, resume unblocks"
+$GS pause test pause from $TOKEN >/dev/null
+check "PAUSED JSON has since/by/reason/boottime" python3 - "$GPU_SLOT_DIR/PAUSED" <<'PY'
+import json, sys
+r = json.load(open(sys.argv[1]))
+print("    ", {k: r.get(k) for k in ("since", "by", "reason", "boottime")})
+sys.exit(0 if isinstance(r["since"], float) and r["by"] and r["reason"].startswith("test pause") and isinstance(r["boottime"], int) else 1)
+PY
+check "status shows PAUSED and its reason" bash -c "'$HERE/gpu_status.sh' | grep -q 'PAUSED:  *YES.*reason=\"test pause'"
+$GS capture --label PZ -- $JOB PZ 0.1 & PPZ=$!
+sleep 1.0
+check "capture does not run while PAUSED" test ! -e "$T/PZ.start"
+check "log: event=paused reason=..." bash -c "grep 'label=PZ' '$GPU_SLOT_LOG' | grep 'event=paused' | grep -q 'reason=\"test pause'"
+$GS perf --label PZP --timeout 0.8 --json "$T/pzp.json" -- $JOB PZP 0.1; RC=$?
+check "perf while PAUSED => exit 75, outcome paused, not run" \
+  bash -c "test $RC -eq 75 -a ! -e '$T/PZP.start' && grep -q '\"outcome\": \"paused\"' '$T/pzp.json'"
+$GS resume >/dev/null
+wait $PPZ; RC=$?
+check "resume unblocks the waiting capture (exit 0) and logs event=resume" \
+  bash -c "test $RC -eq 0 -a -e '$T/PZ.end' -a ! -e '$GPU_SLOT_DIR/PAUSED' && grep -q 'event=resume' '$GPU_SLOT_LOG'"
+
+echo "-- (i6) stuck engine (state E) blocks acquisition"
+echo "99999 E unreal-editor" > "$T/stuck"
+GPU_SLOT_MOCK_STUCK_FILE="$T/stuck" $GS capture --label SK --timeout 1.0 --json "$T/sk.json" -- $JOB SK 0.1; RC=$?
+check "stuck engine => exit 75, outcome stuck-engine, not run" \
+  bash -c "test $RC -eq 75 -a ! -e '$T/SK.start' && grep -q '\"outcome\": \"stuck-engine\"' '$T/sk.json'"
+check "log: stuck-engine pid=99999 stat=E kind=unreal-editor" \
+  bash -c "grep 'label=SK' '$GPU_SLOT_LOG' | grep 'event=stuck-engine' | grep -q 'pid=99999 stat=E kind=unreal-editor'"
+GPU_SLOT_MOCK_STUCK_FILE="$T/stuck" $GS capture --label SK2 -- $JOB SK2 0.1 & PSK=$!
+sleep 0.8
+check "capture keeps waiting while the engine is stuck" test ! -e "$T/SK2.start"
+rm -f "$T/stuck"
+wait $PSK; RC=$?
+check "capture runs once the stuck engine is gone (exit 0)" test $RC -eq 0 -a -e "$T/SK2.end"
+
+echo "-- (i7) explicit owner exceptions: util max 0 / cooldown 0 disable the gate (logged gate=disabled)"
+setutil 100
+GPU_SLOT_CAPTURE_UTIL_MAX=0 GPU_SLOT_LAUNCH_COOLDOWN=0 $GS capture --label GD -- $JOB GD 0.1; RC=$?
+check "capture runs at util 100 with both gates disabled (exit 0)" test $RC -eq 0 -a -e "$T/GD.end"
+check "log: gate=disabled for util and for cooldown" \
+  bash -c "grep 'label=GD' '$GPU_SLOT_LOG' | grep -q 'gate=disabled which=util' && grep 'label=GD' '$GPU_SLOT_LOG' | grep -q 'gate=disabled which=cooldown'"
+setutil 20
+unset GPU_SLOT_ML_PATTERN GPU_SLOT_GPU_PATTERN
+
+echo "-- (i8) GPU client classification on a synthetic process table (no live processes involved)"
+mkdir -p "$T/apps/G.app/Contents/MacOS" "$T/apps/G.app/Contents/Resources" "$T/apps/U.app/Contents/Resources/Data" \
+         "$T/apps/V.app/Contents/UE" "$T/apps/U.app/Contents/MacOS" "$T/apps/V.app/Contents/MacOS"
+touch "$T/apps/G.app/Contents/Resources/game.pck"
+check "gpu_procs kinds, exclusions, dedupe, wrapped, stuck; unreal_procs keeps its shape" \
+  env -u GPU_SLOT_UNREAL_PATTERN -u GPU_SLOT_GPU_IGNORE_PATTERN -u GPU_SLOT_CAPTURE_PATTERN python3 - "$HERE" "$T/apps" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import gpu_slot as g
+A = sys.argv[2]
+UE = "/Users/x/UE_5.8/Engine/Binaries/Mac/UnrealEditor.app/Contents/MacOS/UnrealEditor"
+rows = [  # pid, ppid, stat, comm, cmd, expected kind (None = not a GPU client)
+ (100, 1, "S", "/bin/zsh", "zsh", None),
+ (101, 100, "S", "/usr/bin/python3", "python3 /x/tools/gpu/gpu_slot.py capture --label c -- " + UE, None),
+ (102, 101, "S", UE, UE + " /p/unreal/WebHomage/WebHomage.uproject -game -WHShotDir=/tmp", "unreal-editor"),
+ (103, 1, "S", UE, UE + " /p/unreal/WebHomage/WebHomage.uproject", "unreal-editor"),
+ (104, 1, "S", "/tmp/b/Veyr-Mac-Shipping.app/Contents/MacOS/Veyr-Mac-Shipping", "/tmp/b/Veyr-Mac-Shipping.app/Contents/MacOS/Veyr-Mac-Shipping -windowed", "unreal-game"),
+ (105, 1, "S", A + "/V.app/Contents/MacOS/V", A + "/V.app/Contents/MacOS/V", "unreal-game"),
+ (106, 103, "S", "/Users/x/UE_5.8/Engine/Binaries/Mac/ShaderCompileWorker", "ShaderCompileWorker x", None),
+ (107, 1, "S", "/Users/x/UE_5.8/Engine/Binaries/Mac/CrashReportClient.app/Contents/MacOS/CrashReportClient", "CrashReportClient", None),
+ (108, 1, "S", "/Applications/Godot.app/Contents/MacOS/Godot", "/Applications/Godot.app/Contents/MacOS/Godot --path /w/game", "godot"),
+ (109, 1, "S", A + "/G.app/Contents/MacOS/G", A + "/G.app/Contents/MacOS/G", "godot"),
+ (110, 1, "S", "/usr/local/bin/godot", "godot --headless --script x.gd", None),
+ (111, 1, "S", "/Applications/Unity/Hub/Editor/6000/Unity.app/Contents/MacOS/Unity", "Unity -projectPath /w", "unity"),
+ (112, 111, "S", "/Applications/Unity/Hub/Editor/6000/Unity.app/Contents/MacOS/Unity", "Unity -batchMode -name AssetImportWorker0", None),
+ (113, 1, "S", A + "/U.app/Contents/MacOS/U", A + "/U.app/Contents/MacOS/U", "unity"),
+ (114, 1, "S", "/Applications/Blender.app/Contents/MacOS/Blender", "Blender -b x.blend", "blender"),
+ (115, 1, "S", "/Users/x/.cache/uv/a/bin/python", "/Users/x/.cache/uv/a/bin/python /Users/x/.cache/uv/a/bin/blender-mcp", None),
+ (116, 1, "S", "node", "node /Users/x/.npm/_npx/1/node_modules/.bin/godot-mcp", None),
+ (117, 1, "S", "/opt/homebrew/bin/uv", "/opt/homebrew/bin/uv tool uvx blender-mcp", None),
+ (118, 1, "S", "/opt/homebrew/bin/uv", "uv run python -m video2rig.train --cfg a", "ml"),
+ (119, 118, "S", "/w/.venv/bin/python", "/w/.venv/bin/python -m video2rig.train --cfg a", None),  # folded into 118
+ (120, 1, "S", "/w/.venv/bin/python3", "python3 train.py --epochs 3", "ml"),
+ (121, 1, "S", "/w/.venv/bin/python3", "python3 -m pip install torch", None),
+ (122, 1, "S", "/Library/Application Support/com.elgato.StreamDeck/NodeJS/20/node", "node --no-global-search-paths plugin.js", None),
+ (123, 1, "S", "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome", None),
+ (124, 1, "S", "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Versions/1/Helpers/Google Chrome Helper (GPU).app/Contents/MacOS/Google Chrome Helper (GPU)", "Google Chrome Helper (GPU) --type=gpu-process", None),
+ (125, 1, "S", "/Applications/Steam.app/Contents/MacOS/steam_osx", "steam_osx", None),
+ (126, 1, "Ss", "C:\\windows\\system32\\winedevice.exe", "C:\\windows\\system32\\winedevice.exe", None),
+ (127, 1, "S", "/usr/bin/python3", "python3 /x/tools/gpu/gpu_watchdog.py --loop", None),
+ (128, 1, "E", UE, UE + " /p/unreal/WebHomage/WebHomage.uproject -game", "unreal-editor"),
+ (129, 1, "Z", "(Godot)", "<defunct>", "godot"),
+ (130, 1, "S", "/Applications/Epic Games Launcher.app/Contents/MacOS/EpicGamesLauncher", "EpicGamesLauncher", None),
+ (131, 1, "S", "/Users/x/UE_5.8/Engine/Binaries/Mac/UnrealEditor-Cmd", "UnrealEditor-Cmd p.uproject -run=x -nullrhi", None),
+]
+table = {r[0]: {"pid": r[0], "ppid": r[1], "stat": r[2], "etime": "01:00", "comm": r[3], "cmd": r[4]} for r in rows}
+cfg = g.Cfg()
+got = {p["pid"]: p for p in g.gpu_procs(cfg, table)}
+bad = [(r[0], r[5], got.get(r[0], {}).get("kind")) for r in rows if got.get(r[0], {}).get("kind") != r[5]]
+if bad:
+    print("     mismatches (pid, want, got):", bad)
+ok = not bad
+ok &= got[102]["wrapped"] is True and got[103]["wrapped"] is False and got[102]["role"] == "capture"
+ok &= got[102]["project"] == "p" and got[118]["project"].startswith("video2rig")
+st = sorted((p["pid"], p["stat"][0]) for p in g.stuck_clients(cfg, table))
+ok &= st == [(128, "E"), (129, "Z")]
+ue = g.unreal_procs(cfg, table)
+ok &= [(p["pid"], p["kind"]) for p in ue] == [(102, "capture"), (103, "editor"), (128, "capture")]
+ok &= all(set(p) >= {"pid", "ppid", "etime", "cmd", "comm", "kind", "project"} for p in ue)
+fg = g.foreign_gpu_clients(cfg, table, 101)
+ok &= 102 not in {p["pid"] for p in fg} and 103 in {p["pid"] for p in fg}
+print("     kinds:", g.by_kind(got.values()), "stuck:", st)
+sys.exit(0 if ok else 1)
+PY
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  gpu_watchdog LaunchAgent (rendered by tools/gpu/install_watchdog.sh; __HOME__ / __DIR__ are placeholders).
+  Headless GPU health watchdog: Metal probe + ioreg + stuck GPU clients every 15 s; writes PAUSED and alerts
+  on a driver wedge. Self-reboot stays OFF unless GPU_WATCHDOG_REBOOT=1 is added below AND __DIR__/REBOOT_OK exists.
+
+  NOTE: a LaunchAgent, even with LimitLoadToSessionType=Background, belongs to the user's login and can still be
+  torn down when the GUI session dies (exactly the 2026-10-29 03:28 WindowServer-watchdog logout). For a
+  watchdog that survives logout, run it as a LaunchDaemon with UserName set: install_watchdog.sh renders that
+  variant and prints the one-line sudo command; it never runs it.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.ashen.gpu-watchdog</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/env</string>
+    <string>python3</string>
+    <string>__DIR__/bin/gpu_watchdog.py</string>
+  </array>
+  <key>LimitLoadToSessionType</key><string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin</string>
+    <key>HOME</key><string>__HOME__</string>
+    <key>GPU_LOCK_DIR</key><string>__DIR__</string>
+  </dict>
+  <key>StandardOutPath</key><string>__DIR__/gpu_watchdog.launchd.log</string>
+  <key>StandardErrorPath</key><string>__DIR__/gpu_watchdog.launchd.log</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+</dict>
+</plist>

@@ -66,6 +66,16 @@ Append a dated entry after every loop (or every few hours during one). Newest la
   - Treat any "desktop cannot render" alert as an emergency.
   - Run the orchestrator in `tmux` or another detached host, so a GUI reset cannot take the loop down with it.
 
+## 2026-10-29 03:23 — the GPU driver wedged for 7 hours under five "invisible" clients
+
+- The slot tool reported one engine instance because it only recognised processes whose binary was named `UnrealEditor`. The GPU actually had five or more clients: a chain of 15 cold Unreal `-game` editor launches in 38 minutes with no gap between them (each a 34 GB process), three PyTorch MPS trainers started by the same loop, a packaged game build from a second loop and a Godot renderer from a third. Utilization read 100 % at every one of the last 40 slot acquisitions and the capture class launched anyway (only the perf class waited for a calm GPU).
+- The trainers stalled first (`MTLCommandBuffer waitUntilCompleted`). Eight minutes later a fresh editor submitted its first frame and never got it back; its log sat at frame 0. Four minutes after that WindowServer's main thread blocked in the same driver call and the 40 s watchdog killed it: logout, every GUI app and GUI-hosted agent gone. The driver never recovered (`recoveryCount 0`), the editor sat in `E` state unkillable, a loop still launched a Godot run beside it, and the machine waited seven hours for a power-button reset. The previous boot's unified log survived the reset; in zsh use `/usr/bin/log`, the `log` builtin prints nothing.
+- Rules:
+  - Count every GPU client: packaged game builds, Godot and Unity players, Blender and Metal/MPS/MLX training all take a slot. A trainer that shares the GPU with captures runs under the slot tool like an engine.
+  - A slot at 100 % utilization is not a free slot: captures wait for headroom (under ~85 % for 10 s) and leave a 20 s cooldown between cold engine launches; after a settle timeout the round is skipped and logged, never forced.
+  - "No frame 1 within 2x the normal startup", any engine in `E`/`Z` state, or a 5 s Metal probe that hangs is the wedge signal: a machine-wide PAUSED file stops every launch, nothing is SIGKILLed, WIP is pushed, the owner is notified. A headless watchdog independent of every loop does this check every 15 s.
+  - After a wedge or reset, run one renderer and no concurrent GPU training for the first clean hour. All three loops restarted the previous mix within 13 minutes of the reboot.
+
 ## 2026-10-28 12:30 — an uncapped game build broke the owner's stream mic
 
 - A Godot capture (Orchard Reach, 3440x1440, no frame cap) sat at 100 % GPU for the whole session. Streamlabs on the same Mac logged 37.6 % lagged frames and 44 mic restarts in four minutes: OBS clocks its audio mixer off the render loop, so a starved renderer drops the mic while every other app's mic keeps working.
