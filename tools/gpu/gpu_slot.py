@@ -2,7 +2,8 @@
 # Homage fan game tooling. Not an official Marvel, Sony or Insomniac project; no affiliation.
 """gpu_slot: machine-wide GPU launch guard for agent-launched engines, renderers and GPU trainers.
 
-  gpu_slot.sh capture [opts] -- CMD...   hold one of N (default 2) shared capture slots; before launching
+  gpu_slot.sh capture [opts] -- CMD...   hold one of N (default 3, clamped by the GPU watchdog tripwire)
+                                         shared capture slots; before launching
                                          CMD pass the capture gate: fewer than N foreign GPU clients,
                                          GPU "Device Utilization %" < 85 for 10 consecutive s, and >= 20 s
                                          since the last release (cold-launch cooldown)
@@ -10,6 +11,7 @@
                                          capture process, and GPU "Device Utilization %" < 15 for 10
                                          consecutive seconds; then runs CMD (max hold 15 min)
   gpu_slot.sh status [--json]            holders, waiters, utilization, every GPU client by kind, PAUSED
+  gpu_slot.sh cap                        effective capture-slot / GPU-client cap and why (exit 3 on a trip)
   gpu_slot.sh util                       print the current GPU utilization (integer percent)
   gpu_slot.sh summary FILE.json          one-line "GPU-LOCK: ..." summary of a --json sidecar (paste next to perf numbers)
   gpu_slot.sh pause [reason words...]    create <state dir>/PAUSED: no class launches anything until `resume`
@@ -47,9 +49,21 @@ GPU clients (gpu_procs()): every process that renders or computes on the GPU, no
       gpu_slot.sh capture --label trainer -- python train.py
 
 Guards (owner rules, agents-md PR #33, after the 2026-10-29 03:23-10:17 seven-hour GPU driver wedge):
-  * client cap: a capture holding a slot does not launch while >= GPU_SLOT_CAPTURE_SLOTS foreign GPU
+  * cap 3 + watchdog tripwire (owner decision 2026-10-29 23:20, "do the maximum amount that is safe at
+    the same time"; evidence: 98 gated launches and 2841 watchdog samples after the 10:17 reboot with zero
+    warnings/trips; cap 4 + tripwire ran 10-02..10-28; the wedge came from 5+ clients incl. uncounted MPS
+    trainers and 15 gapless cold launches at 100 % util). The effective cap = min(GPU_SLOT_CAPTURE_SLOTS
+    (default 3), watchdog cap), re-read from <state dir>/gpu_watchdog.json (GPU_SLOT_WATCHDOG_JSON) at every
+    acquire attempt and every gate poll:
+        trip set (or tripped true)                               -> 0: nothing acquires or launches
+        warn non-null, hang_strikes > 0, any stuck_since entry   -> 2
+        file missing / unreadable / updated > GPU_SLOT_WATCHDOG_STALE_S (120) s ago -> 2 ("watchdog stale")
+    A capture acquires only while fewer capture slots are held (all of capture.N.lock counted) than the
+    effective cap (and than GPU_SLOT_STREAMING_SLOTS while STREAMING). MPS trainers stay serialized with
+    engine launches by the capture util gate below.
+  * client cap: a capture holding a slot does not launch while >= <effective cap> foreign GPU
     clients run (foreign = not a descendant of this wrapper); log "wait phase=cap-full clients=pid:kind,..";
-    after the class wait timeout: exit 75, outcome cap-full-timeout.
+    after the class wait timeout: exit 75, outcome cap-full-timeout (a trip waits here too, logged cap=0).
   * capture util gate + cooldown: utilization < GPU_SLOT_CAPTURE_UTIL_MAX for GPU_SLOT_CAPTURE_CALM_SECONDS
     consecutive s AND >= GPU_SLOT_LAUNCH_COOLDOWN s since <state dir>/last_release (epoch, written at every
     capture launch and every release). Budget GPU_SLOT_CAPTURE_SETTLE_TIMEOUT s: then "settle-timeout", CMD NOT run, exit 75,
@@ -64,7 +78,8 @@ Guards (owner rules, agents-md PR #33, after the 2026-10-29 03:23-10:17 seven-ho
 
 Environment (all optional; tests shrink the timings):
   GPU_SLOT_DIR, GPU_SLOT_LOG, GPU_SLOT_POLL=1, GPU_SLOT_UTIL_MAX=15, GPU_SLOT_CALM_SECONDS=10,
-  GPU_SLOT_CAPTURE_SLOTS=2 (also the foreign GPU client cap), GPU_SLOT_PERF_MAX_HOLD=900,
+  GPU_SLOT_CAPTURE_SLOTS=3 (also the foreign GPU client cap; clamped by the watchdog tripwire),
+  GPU_SLOT_WATCHDOG_JSON=<state dir>/gpu_watchdog.json, GPU_SLOT_WATCHDOG_STALE_S=120, GPU_SLOT_PERF_MAX_HOLD=900,
   GPU_SLOT_CAPTURE_MAX_HOLD=2400, GPU_SLOT_PERF_WAIT_TIMEOUT=1800, GPU_SLOT_CAPTURE_WAIT_TIMEOUT=3600,
   GPU_SLOT_SAMPLE_INTERVAL=2, GPU_SLOT_WAIT_LOG_EVERY=30, GPU_SLOT_LABEL, GPU_SLOT_QUIET=1,
   GPU_SLOT_CAPTURE_UTIL_MAX=85 (0 disables), GPU_SLOT_CAPTURE_CALM_SECONDS=10,
@@ -146,7 +161,7 @@ class Cfg:
         self.poll = _f("GPU_SLOT_POLL", 1.0)
         self.util_max = _f("GPU_SLOT_UTIL_MAX", 15.0)
         self.calm = _f("GPU_SLOT_CALM_SECONDS", 10.0)
-        self.slots = int(_f("GPU_SLOT_CAPTURE_SLOTS", 2))
+        self.slots = int(_f("GPU_SLOT_CAPTURE_SLOTS", 3))
         self.max_hold = {"perf": _f("GPU_SLOT_PERF_MAX_HOLD", 900.0),
                          "capture": _f("GPU_SLOT_CAPTURE_MAX_HOLD", 2400.0)}
         self.wait_timeout = {"perf": _f("GPU_SLOT_PERF_WAIT_TIMEOUT", 1800.0),
@@ -176,6 +191,8 @@ class Cfg:
         self.streaming_flag = os.path.join(self.dir, "STREAMING")
         self.paused_flag = os.path.join(self.dir, "PAUSED")
         self.last_release = os.path.join(self.dir, "last_release")
+        self.watchdog_json = e.get("GPU_SLOT_WATCHDOG_JSON") or os.path.join(self.dir, "gpu_watchdog.json")
+        self.watchdog_stale = _f("GPU_SLOT_WATCHDOG_STALE_S", 120.0)
 
     def ensure_dirs(self):
         for d in (self.dir, self.holders, self.queue, self.locks, os.path.dirname(self.log)):
@@ -584,6 +601,51 @@ def hold_reason(cfg, table=None):
     return None
 
 
+DEMOTED_CAP = 2
+
+
+def watchdog_cap(cfg):
+    """(cap, reasons) allowed by the GPU watchdog tripwire right now: cfg.slots when healthy, 2 when demoted
+    (warn / hang strike / stuck_since / missing or stale file), 0 on a trip. Reasons empty = full cap."""
+    demoted = min(cfg.slots, DEMOTED_CAP)
+    try:
+        with open(cfg.watchdog_json) as fh:
+            wd = json.load(fh)
+        if not isinstance(wd, dict):
+            raise ValueError("not a JSON object")
+    except FileNotFoundError:
+        return demoted, ["watchdog stale: %s missing -> cap %d" % (cfg.watchdog_json, demoted)]
+    except Exception as ex:
+        return demoted, ["watchdog stale: %s unreadable: %s -> cap %d" % (cfg.watchdog_json, str(ex)[:120], demoted)]
+    if wd.get("trip") or wd.get("tripped") is True:   # refuses even when stale: the last word was "stop"
+        return 0, ["watchdog TRIP %s (last_trip %s): every launch refused until the owner clears it"
+                   % (json.dumps(wd.get("trip"), default=str)[:160], json.dumps(wd.get("last_trip"), default=str)[:80])]
+    why = []
+    try:
+        age = time.time() - datetime.fromisoformat(str(wd["updated"])).timestamp()
+    except Exception:
+        try:
+            age = time.time() - os.path.getmtime(cfg.watchdog_json)
+        except OSError:
+            age = None
+    if age is None or age > cfg.watchdog_stale:
+        why.append("watchdog stale: updated %s (> %g s)" % ("?" if age is None else "%.0f s ago" % age, cfg.watchdog_stale))
+    if wd.get("warn") is not None:
+        why.append("watchdog warn: %s" % json.dumps(wd.get("warn"), default=str)[:160])
+    hs = wd.get("hang_strikes")
+    try:
+        hs_n = float(hs or 0)
+    except (TypeError, ValueError):
+        hs_n = 1.0
+    if hs_n > 0:
+        why.append("watchdog hang_strikes=%s" % hs)
+    if wd.get("stuck_since"):
+        why.append("watchdog stuck_since: %s" % json.dumps(wd.get("stuck_since"), default=str)[:160])
+    if why:
+        return demoted, [w + " -> cap %d" % demoted for w in why]
+    return cfg.slots, []
+
+
 def read_last_release(cfg):
     """Epoch of the last release recorded in <state dir>/last_release (0.0 if none)."""
     try:
@@ -645,7 +707,13 @@ def capture_gate(cfg, log, me, m_enq, wait_timeout):
         table = proc_table(cfg)
         hold = hold_reason(cfg, table)
         foreign = foreign_gpu_clients(cfg, table, me) if hold is None else []
-        cap_full = hold is None and len(foreign) >= cfg.slots
+        cap, cap_why = watchdog_cap(cfg)
+        info["client_cap"] = cap
+        if cap_why:
+            info["cap_why"] = "; ".join(cap_why)[:300]
+        else:
+            info.pop("cap_why", None)
+        cap_full = hold is None and len(foreign) >= cap
         u = read_util(cfg)
         if not util_on:
             util_ok = True
@@ -668,14 +736,16 @@ def capture_gate(cfg, log, me, m_enq, wait_timeout):
             waited = nowm - m_enq
             if wait_timeout > 0 and waited > wait_timeout:
                 outcome = hold[0] if hold is not None else "cap-full-timeout"
+                extra = {"cap": cap, "cap_why": info["cap_why"]} if cap_why and hold is None else {}
                 log("wait-timeout", phase="gate", outcome=outcome, waited_s=round(waited, 1),
-                    clients=fmt_clients(foreign), echo=True)
+                    clients=fmt_clients(foreign), echo=True, **extra)
                 return outcome, info
             if hold is not None:
                 log_hold(log, thr, hold, phase="gate")
             elif thr.due("cap-full"):
-                log("wait", phase="cap-full", clients=fmt_clients(foreign), cap=cfg.slots,
-                    waited_s=round(waited, 1), echo=True)
+                extra = {"cap_why": info["cap_why"]} if cap_why else {}
+                log("wait", phase="cap-full", clients=fmt_clients(foreign), cap=cap,
+                    waited_s=round(waited, 1), echo=True, **extra)
         else:
             settle_spent += dt
             if cfg.capture_settle_timeout > 0 and settle_spent > cfg.capture_settle_timeout:
@@ -892,7 +962,10 @@ def run_wrapped(cls, label, json_path, wait_timeout, cmd):
             waited = time.monotonic() - m_enq
             if wait_timeout > 0 and waited > wait_timeout:
                 outcome = hold[0] if hold is not None else "wait-timeout"
-                log("wait-timeout", waited_s=round(waited, 1), outcome=outcome, echo=True)
+                extra = {}
+                if cls == "capture" and hold is None and getattr(cfg, "cap_why", None):
+                    extra = {"cap": cfg.eff_slots, "cap_why": "; ".join(cfg.cap_why)[:300]}
+                log("wait-timeout", waited_s=round(waited, 1), outcome=outcome, echo=True, **extra)
                 result.update(exit_code=EX_TIMEOUT, outcome=outcome, wait_s=round(waited, 1),
                               exclusive=False, contaminated=True)
                 write_result(cfg, json_path, result)
@@ -900,10 +973,13 @@ def run_wrapped(cls, label, json_path, wait_timeout, cmd):
             if waited - last_log >= cfg.wait_log_every or last_log == 0.0:
                 ahead = [r for r in queue if r.get("pid") != me and r.get("ticket", "") < ticket]
                 holders = list_records(cfg.holders)
+                extra = {}
+                if cls == "capture" and getattr(cfg, "cap_why", None):
+                    extra = {"cap": cfg.eff_slots, "cap_why": "; ".join(cfg.cap_why)[:300]}
                 log("wait", phase="queue", waited_s=round(waited, 1), ahead=len(ahead),
                     holders=",".join("%s:%s" % (h.get("class"), h.get("pid")) for h in holders),
                     streaming=str(streaming(cfg)).lower(),
-                    echo=(last_log == 0.0 or waited - last_log >= cfg.wait_log_every))
+                    echo=(last_log == 0.0 or waited - last_log >= cfg.wait_log_every), **extra)
                 last_log = waited
             time.sleep(cfg.poll)
         try:
@@ -1128,18 +1204,30 @@ def _killpg(child, sig, quiet=False):
 
 
 def try_acquire_capture(cfg):
-    """Shared: SH on perf.lock (fails while a perf run holds/settles) + one free capture slot."""
+    """Shared: SH on perf.lock (fails while a perf run holds/settles) + one free capture slot, and only while
+    fewer capture slots are held (every capture.N.lock counted) than the effective cap: min(configured or
+    streaming slots, watchdog_cap)."""
+    cap, cfg.cap_why = watchdog_cap(cfg)
+    slots = cfg.streaming_slots if streaming(cfg) else cfg.slots
+    cfg.eff_slots = max(0, min(slots, cap))
+    if cfg.eff_slots <= 0:
+        return None
     sh = try_flock(cfg.perf_lock, fcntl.LOCK_SH)
     if sh is None:
         return None
-    slots = cfg.streaming_slots if streaming(cfg) else cfg.slots
-    if slots <= 0:
-        release_fd(sh)
-        return None
-    for i in range(slots):
+    held, got = 0, None
+    for i in range(max(cfg.slots, slots)):
         fd = try_flock(os.path.join(cfg.locks, "capture.%d.lock" % i), fcntl.LOCK_EX)
-        if fd is not None:
-            return [sh, fd], str(i)
+        if fd is None:
+            held += 1
+        elif got is None and i < slots:
+            got = (fd, i)
+        else:
+            release_fd(fd)
+    if got is not None and held < cfg.eff_slots:
+        return [sh, got[0]], str(got[1])
+    if got is not None:
+        release_fd(got[0])
     release_fd(sh)
     return None
 
@@ -1182,10 +1270,13 @@ def cmd_status(as_json=False):
     last_rel = read_last_release(cfg)
     for r in holders + queue:
         r["alive"] = pid_alive(r.get("pid", -1), r.get("start", ""))
+    cap, cap_why = watchdog_cap(cfg)
     if as_json:
         print(json.dumps({"util": util, "util_max": cfg.util_max, "perf_ready_now": util is not None and util < cfg.util_max,
                           "holders": holders, "waiters": queue, "unreal": ue, "slots": cfg.slots,
-                          "gpu_clients": gpu, "gpu_clients_by_kind": by_kind(gpu), "gpu_client_cap": cfg.slots,
+                          "effective_slots": min(cfg.streaming_slots if streaming(cfg) else cfg.slots, cap),
+                          "watchdog_cap": cap, "cap_why": cap_why,
+                          "gpu_clients": gpu, "gpu_clients_by_kind": by_kind(gpu), "gpu_client_cap": cap,
                           "stuck": stuck, "paused": paused, "last_release_epoch": last_rel or None,
                           "capture_gate": {"util_max": cfg.capture_util_max, "calm_s": cfg.capture_calm,
                                            "cooldown_s": cfg.cooldown, "settle_timeout_s": cfg.capture_settle_timeout}},
@@ -1210,7 +1301,8 @@ def cmd_status(as_json=False):
     print("Perf lock:     %s" % ("HELD by pid %s label=%s state=%s for %ds" % (
         perf_h[0]["pid"], perf_h[0].get("label"), perf_h[0].get("state"), nowe - perf_h[0].get("since_epoch", nowe))
         if perf_h else "free"))
-    print("Capture slots: %d/%d in use%s" % (len(cap_h), cfg.streaming_slots if streaming(cfg) else cfg.slots,
+    print("Watchdog cap:  %d of %d configured%s" % (cap, cfg.slots, ("   " + "; ".join(cap_why)) if cap_why else "   (healthy)"))
+    print("Capture slots: %d/%d in use%s" % (len(cap_h), min(cfg.streaming_slots if streaming(cfg) else cfg.slots, cap),
           "   STREAMING flag set -> %d slot(s), captures %s, fps cap %d" % (
               cfg.streaming_slots, "WAIT" if cfg.streaming_slots <= 0 else "allowed", cfg.fps_cap_streaming)
           if streaming(cfg) else "   (fps cap %d)" % cfg.fps_cap))
@@ -1230,7 +1322,7 @@ def cmd_status(as_json=False):
         ("%ds ago" % (nowe - last_rel)) if last_rel else "none recorded", cfg.capture_settle_timeout))
     kinds = by_kind(gpu)
     print("GPU clients: %d (%s)   [cap: a capture launches only while < %d foreign GPU clients run]" % (
-        len(gpu), ", ".join("%s %d" % (k, kinds[k]) for k in GPU_KINDS if k in kinds) or "none", cfg.slots))
+        len(gpu), ", ".join("%s %d" % (k, kinds[k]) for k in GPU_KINDS if k in kinds) or "none", cap))
     for p in gpu:
         print("  pid=%-6s %-13s role=%-10s stat=%-4s wrapped=%-3s etime=%-11s project=%-14s cmd=%s" % (
             p["pid"], p["kind"], p["role"], p["stat"], "yes" if p["wrapped"] else "no", p["etime"],
@@ -1266,6 +1358,13 @@ def main(argv):
     sub = argv[1]
     if sub == "status":
         return cmd_status("--json" in argv[2:])
+    if sub == "cap":
+        cfg = Cfg()
+        cap, why = watchdog_cap(cfg)
+        print("cap %d" % cap)
+        for w in why:
+            print("  " + w)
+        return 0 if cap > 0 else 3
     if sub in ("pause", "resume"):
         cfg = Cfg()
         cfg.ensure_dirs()

@@ -23,7 +23,26 @@ export GPU_SLOT_GPU_IGNORE_PATTERN="^(?!.*$TOKEN)"
 # capture launch gate at test speed (defaults: util < 85 for 10 s, 20 s cooldown, 180 s settle budget)
 export GPU_SLOT_CAPTURE_CALM_SECONDS=0.2 GPU_SLOT_LAUNCH_COOLDOWN=0.01 GPU_SLOT_CAPTURE_SETTLE_TIMEOUT=30
 unset GPU_SLOT_HELD GPU_SLOT_JSON GPU_SLOT_MOCK_STUCK_FILE GPU_SLOT_ML_PATTERN GPU_SLOT_GPU_PATTERN
-unset GPU_SLOT_CAPTURE_UTIL_MAX GPU_SLOT_CAPTURE_SLOTS
+unset GPU_SLOT_CAPTURE_UTIL_MAX GPU_SLOT_CAPTURE_SLOTS GPU_SLOT_WATCHDOG_STALE_S
+# GPU watchdog tripwire reads a private fake (never the live gpu_watchdog.json)
+export GPU_SLOT_WATCHDOG_JSON="$T/wd.json"
+wd() {  # wd healthy | warn | strike | stuck | trip | old   (updated = now, or 600 s ago for old)
+  python3 - "$GPU_SLOT_WATCHDOG_JSON" "$1" <<'PY'
+import datetime, json, sys
+p, m = sys.argv[1], sys.argv[2]
+now = datetime.datetime.now().astimezone()
+d = {"schema": "gpu_watchdog/1", "hang_strikes": 0, "stuck_since": {}, "warn": None, "trip": None, "last_trip": None,
+     "tripped": False, "updated": (now - datetime.timedelta(seconds=600 if m == "old" else 0)).isoformat(timespec="milliseconds")}
+if m == "warn": d["warn"] = {"type": "unregistered-load", "util": 99}
+if m == "strike": d["hang_strikes"] = 1
+if m == "stuck": d["stuck_since"] = {"4242": 1793300000}
+if m == "trip": d.update(trip={"type": "wedge", "reason": "probe-hang x3"}, tripped=True)
+json.dump(d, open(p, "w"))
+PY
+}
+wd healthy
+# sections (a)-(i) test the lock mechanics at the pre-2026-10-29 cap of 2; (j) tests the default 3 + tripwire clamp
+export GPU_SLOT_CAPTURE_SLOTS=2
 
 cat > "$T/job.py" <<'PY'
 import sys, time
@@ -438,6 +457,82 @@ ok &= 102 not in {p["pid"] for p in fg} and 103 in {p["pid"] for p in fg}
 print("     kinds:", g.by_kind(got.values()), "stuck:", st)
 sys.exit(0 if ok else 1)
 PY
+
+echo "== (j) default 3 slots / GPU clients, clamped by the GPU watchdog tripwire (owner 2026-10-29) =="
+unset GPU_SLOT_CAPTURE_SLOTS
+export GPU_SLOT_ML_PATTERN="FAKEML_$TOKEN" GPU_SLOT_GPU_PATTERN="FAKEGPU_$TOKEN"
+setutil 20
+capof() { "$GS" cap | head -1; }
+maxconc() {  # maxconc [=] N name... : at most (exactly with =) N of the named jobs ran at once
+  python3 - "$T" "$@" <<'PY'
+import sys
+d, a = sys.argv[1], sys.argv[2:]
+exact = a[0] == "="
+if exact: a = a[1:]
+n, names = int(a[0]), a[1:]
+iv = [(float(open("%s/%s.start" % (d, x)).read()), float(open("%s/%s.end" % (d, x)).read())) for x in names]
+ev = sorted([(s, 1) for s, e in iv] + [(e, -1) for s, e in iv])
+cur = mx = 0
+for t, dl in ev:
+    cur += dl; mx = max(mx, cur)
+print("      max concurrent: %d" % mx)
+sys.exit(0 if (mx == n if exact else mx <= n) else 1)
+PY
+}
+wd healthy; check "cap: healthy watchdog -> cap 3 (default GPU_SLOT_CAPTURE_SLOTS)" test "$(capof)" = "cap 3"
+for m in warn strike stuck old; do wd $m; check "cap: watchdog $m -> cap 2" test "$(capof)" = "cap 2"; done
+rm -f "$GPU_SLOT_WATCHDOG_JSON"; check "cap: watchdog file missing (stale) -> cap 2" test "$(capof)" = "cap 2"
+echo '{nope' > "$GPU_SLOT_WATCHDOG_JSON"; check "cap: watchdog file unreadable (stale) -> cap 2" test "$(capof)" = "cap 2"
+wd trip; "$GS" cap > "$T/cap.out"; RC=$?
+check "cap: trip -> cap 0, exit 3, reason names the TRIP" bash -c "test $RC -eq 3 && grep -q '^cap 0' '$T/cap.out' && grep -q 'watchdog TRIP' '$T/cap.out'"
+wd healthy; check "cap: GPU_SLOT_CAPTURE_SLOTS=1 still overrides (healthy -> 1)" test "$(GPU_SLOT_CAPTURE_SLOTS=1 capof)" = "cap 1"
+check "status --json: effective_slots 3, gpu_client_cap 3, cap_why empty" python3 - "$HERE" <<'PY'
+import json, subprocess, sys
+s = json.loads(subprocess.run([sys.argv[1] + "/gpu_status.sh", "--json"], capture_output=True, text=True).stdout)
+sys.exit(0 if s["effective_slots"] == 3 and s["gpu_client_cap"] == 3 and s["cap_why"] == [] and s["slots"] == 3 else 1)
+PY
+$GS capture --label J1 -- $JOB J1 2.0 & Q1=$!
+$GS capture --label J2 -- $JOB J2 2.0 & Q2=$!
+$GS capture --label J3 -- $JOB J3 2.0 & Q3=$!
+wait $Q1 $Q2 $Q3
+check "healthy: three captures ran at once" maxconc = 3 J1 J2 J3
+wd warn
+$GS capture --label K1 -- $JOB K1 2.0 & Q1=$!
+$GS capture --label K2 -- $JOB K2 2.0 & Q2=$!
+waitf "$T/K1.start"; waitf "$T/K2.start"; sleep 0.3
+$GS capture --label K3 -- $JOB K3 0.3 & Q3=$!
+sleep 0.8
+check "watchdog warn: third capture has NOT started while two slots are held" test ! -e "$T/K3.start"
+wait $Q1 $Q2 $Q3
+check "watchdog warn: at most 2 ran at once" maxconc 2 K1 K2 K3
+check "  ... the queue wait log names the clamp (cap=2, watchdog warn)" bash -c "grep 'label=K3' '$GPU_SLOT_LOG' | grep 'event=wait' | grep -q 'cap=2 .*watchdog warn'"
+wd healthy
+$GS capture --label L1 -- $JOB L1 0.8 & Q1=$!
+$GS capture --label L2 -- $JOB L2 2.5 & Q2=$!
+$GS capture --label L3 -- $JOB L3 2.5 & Q3=$!
+waitf "$T/L1.start"; waitf "$T/L2.start"; waitf "$T/L3.start"
+wd strike
+$GS capture --label L4 -- $JOB L4 0.2 & Q4=$!
+wait $Q1 $Q2 $Q3 $Q4
+check "demoted while 3 run: a new capture waits until fewer than 2 slots are held (after the 2nd release)" \
+  ge "$(val L4.start)" "$(python3 -c "print(min($(val L2.end),$(val L3.end)) - 0.05)")"
+wd healthy
+fake_gpu 60 FAKEML; ML=$FAKE_PID
+fake_gpu 60 FAKEGPU; OG=$FAKE_PID
+sleep 0.3
+$GS capture --label M1 -- $JOB M1 0.1; RC=$?
+check "healthy: 2 foreign GPU clients (trainer + other) -> capture launches (client cap 3)" test $RC -eq 0 -a -e "$T/M1.end"
+wd warn
+$GS capture --label M2 --timeout 1.5 --json "$T/m2.json" -- $JOB M2 0.1; RC=$?
+check "watchdog warn: 2 foreign GPU clients -> cap-full at cap 2, exit 75, command not run" \
+  bash -c "test $RC -eq 75 -a ! -e '$T/M2.start' && grep -q '\"outcome\": \"cap-full-timeout\"' '$T/m2.json'"
+check "  ... cap-full log carries cap=2 and the watchdog reason" bash -c "grep 'label=M2' '$GPU_SLOT_LOG' | grep 'phase=cap-full' | grep -q 'cap=2 .*watchdog warn'"
+kill $ML $OG 2>/dev/null; wait $ML $OG 2>/dev/null
+wd trip
+$GS capture --label TRIP --timeout 1.0 --json "$T/trip.json" -- $JOB TRIP 0.1; RC=$?
+check "watchdog trip: capture never acquires, exit 75, command NOT run" test $RC -eq 75 -a ! -e "$T/TRIP.start"
+check "  ... wait-timeout log line carries cap=0 and the TRIP reason" bash -c "grep 'label=TRIP' '$GPU_SLOT_LOG' | grep 'event=wait-timeout' | grep -q 'cap=0 .*watchdog TRIP'"
+wd healthy
 
 echo
 echo "RESULT: $PASS passed, $FAIL failed"

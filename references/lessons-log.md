@@ -97,3 +97,9 @@ Append a dated entry after every loop (or every few hours during one). Newest la
   - Never launch Wave Link or any second audio engine on the stream mic from an agent. Never change a live source's device.
   - Stream scenes capture the game window, not the whole display; measure the stream from the viewer side (`streamlink` 40 s + silence/zero analysis), not from the preview.
 
+
+## 2026-10-29 23:20 — cap 3 with a watchdog tripwire, after a clean day at cap 2
+
+- **Evidence:** after the reboot that ended the 10-29 wedge, a full day ran 98 gated launches and 2841 GPU-watchdog samples with zero warnings or trips. The earlier regime (cap 4 with a tripwire) had run for weeks. The wedge itself came from 5+ GPU clients, including MPS trainers that nothing counted, and from 15 cold launches with no gaps at 100 % util.
+- **Rule now:** a machine-wide cap of three renderer-bearing GPU clients, with engines, packaged games, Blender and trainers all counted. `gpu_slot` re-reads `gpu_watchdog.json` at every acquire and every gate poll. A trip refuses every launch. A warn, a hang strike, a stuck entry, or a missing or stale (> 120 s) file demotes the cap to 2. Trainers stay serialized with engine launches through the util gate. The 20 s gaps, the 10/h per-session budgets and the frame-1 watchdog are unchanged.
+- **Lesson:** raise concurrency only with a tripwire that lowers it automatically, and treat a silent or stale watchdog as a warning, never as healthy.
