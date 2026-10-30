@@ -97,3 +97,9 @@ Append a dated entry after every loop (or every few hours during one). Newest la
   - Never launch Wave Link or any second audio engine on the stream mic from an agent. Never change a live source's device.
   - Stream scenes capture the game window, not the whole display; measure the stream from the viewer side (`streamlink` 40 s + silence/zero analysis), not from the preview.
 
+
+## 2026-10-30 11:40 — 18 hours of passed gates shipped clips that look the same
+
+An overnight creature re-animation loop (AI video → joint reader → rig fit → refine → blind A/B) passed every gate it had: reader held-out under 3 px, fit under 5 px, loop seams, foot drift, and an in-game blind A/B with a "wins or ties" ship rule. The owner looked at the before/after and saw about 80 % the same. Every gate measured fidelity (does the rig match the video) and none measured quality (is the video a better performance than the clip it replaces). The inputs that decide quality were all fixed by the brief: provider, start picture (the current rig in its stance), timing windows, rig. The first blind round already came back ties and marginal wins; the loop kept going because the goal said "do not stop early", then spent the night chasing a pixel bar with no visible effect.
+
+Rules (added to the hard-won list): a fidelity metric proves the transfer, never the upgrade; pilot one piece beside what it replaces on a close-up before scaling; when the first blind round is flat, stop and report the ceiling and the levers even if the goal says not to stop; "tie ships" is a replacement rule, not an upgrade rule.

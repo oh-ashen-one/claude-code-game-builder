@@ -68,6 +68,8 @@ Break the game into pieces that can be judged independently. Give each piece one
 - **Timestamps:** read the clock. Guessed times drifted hours off twice.
 - **Tear down** merged worktrees, captures and engine caches (DerivedDataCache, Intermediate, Library) in the same session.
 
+- **Fidelity gates are not quality gates (2026-10-30).** Fit px, check %, seam, drift and held-out error prove that a transfer worked, not that the result is better than what it replaces. Pilot one piece beside the old one on a close-up before scaling; if the first blind round comes back ties or marginal wins, stop and report the ceiling and the levers (provider, start picture, timing freedom, exaggeration) even when the brief says "do not stop early". A "wins or ties" ship rule produces "same"; an upgrade loop ships only on "visibly better".
+
 ## Stall and oscillation playbook
 
 - Scores flat for 3 rounds → diagnose the approach, not the next gap. Our traversal sat at 2–3/10 for three rounds on a placeholder body; porting the real rig + animation system jumped it.
